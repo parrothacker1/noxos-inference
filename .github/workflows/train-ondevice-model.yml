@@ -1,0 +1,60 @@
+name: Train and publish on-device model
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - run: uv sync
+
+      - name: Fetch dataset
+        run: |
+          mkdir -p data/raw
+          URL=$(uv run python -c "import tomllib; print(tomllib.load(open('config.toml','rb'))['dataset']['url'])")
+          curl -sL "$URL" -o data/raw/UNSW_NB15_training-set.csv
+
+      - name: Train
+        run: uv run training/train_network_model.py
+
+      - name: Export on-device model
+        run: uv run training/export_ondevice_model.py
+
+      - name: Verify export matches the trained model
+        run: uv run tests/test_export_matches_model.py
+
+      - name: Build release assets
+        id: assets
+        run: |
+          VERSION=$(date +%s)
+          cp service/model_ondevice.json model.json
+          SHA256=$(sha256sum model.json | cut -d' ' -f1)
+          echo "$SHA256  model.json" > model.json.sha256
+          printf '{"version": %s, "sha256": "%s", "modelUrl": "https://github.com/%s/releases/download/ondevice-model-latest/model.json"}' \
+            "$VERSION" "$SHA256" "$GITHUB_REPOSITORY" > manifest.json
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Publish rolling "latest" release
+        run: |
+          gh release delete ondevice-model-latest --yes --cleanup-tag || true
+          gh release create ondevice-model-latest model.json manifest.json model.json.sha256 training/METRICS.md \
+            --title "On-device network model (latest)" \
+            --notes "Automated training run, version ${{ steps.assets.outputs.version }}."
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Publish versioned release
+        run: |
+          gh release create "ondevice-model-${{ steps.assets.outputs.version }}" model.json manifest.json model.json.sha256 training/METRICS.md \
+            --title "On-device network model v${{ steps.assets.outputs.version }}" \
+            --notes "Automated training run."
+        env:
+          GH_TOKEN: ${{ github.token }}

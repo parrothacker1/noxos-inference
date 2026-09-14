@@ -11,17 +11,38 @@ Never sees raw packet payload or file contents beyond what ClamAV needs — ever
 
 ## Layout
 
-- `training/` — dataset prep + model training, produces the artifact `service/` serves.
+- `config.toml` — dataset URL, training hyperparameters, verdict thresholds, output paths. Single source of truth for both the training script and the CI workflow.
+- `training/` — dataset prep + model training, produces the server-side artifact `service/` serves and (`export_ondevice_model.py`) the on-device JSON tree export `noxos-app`'s `OnDeviceNetworkClassifier` consumes.
 - `service/` — FastAPI app: `POST /analyze/network`, `POST /analyze/file`.
 - `infra/` — EC2 deploy scripts for the self-hosted inference box (`us-east-1`, no IAM role needed — see `infra/README.md`).
 - `tests/` — real tests against the trained model and the live service, not decorative ones.
+- `.github/workflows/train-ondevice-model.yml` — trains and publishes the on-device model as a GitHub Release (manual trigger). See "On-device model releases" below.
+
+Package management: [`uv`](https://docs.astral.sh/uv/), not pip/poetry. `pyproject.toml` + `uv.lock` are the source of truth for dependencies.
 
 ## Run locally
 
 ```bash
-python3 -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
-uvicorn service.app:app --reload
+uv sync
+uv run uvicorn service.app:app --reload
 ```
 
-See `training/` for how to regenerate the model artifact, and `infra/README.md` for deploying this for real.
+To retrain and re-export the on-device model:
+
+```bash
+mkdir -p data/raw
+curl -sL "$(uv run python -c "import tomllib; print(tomllib.load(open('config.toml','rb'))['dataset']['url'])")" -o data/raw/UNSW_NB15_training-set.csv
+uv run training/train_network_model.py
+uv run training/export_ondevice_model.py
+uv run tests/test_export_matches_model.py
+```
+
+## On-device model releases
+
+`.github/workflows/train-ondevice-model.yml` (manual `workflow_dispatch` trigger) trains, exports, and publishes the on-device model as GitHub Releases — a rolling `ondevice-model-latest` release (assets always overwritten, the one `noxos-app` actually polls) plus a permanent `ondevice-model-<unix-timestamp>` release per run for history. Assets: `model.json` (the tree JSON `OnDeviceNetworkClassifier` loads), `manifest.json` (`{version, sha256, modelUrl}` — the schema `noxos-app`'s `ModelUpdateManager` expects), `model.json.sha256`, `METRICS.md`.
+
+**Deliberately separate from any future `ml-server-*` release scheme** — see `feature/ml-server-architecture` branch and this repo's `TASKS.md` — so the two don't collide or get confused later.
+
+The raw dataset is never committed or pushed anywhere (`data/raw/` gitignored) — every training run, local or CI, fetches it fresh from the URL in `config.toml`.
+
+See `training/` for how to regenerate the server-side model artifact, and `infra/README.md` for deploying the FastAPI service for real.
