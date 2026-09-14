@@ -31,7 +31,9 @@ To retrain and re-export the on-device model:
 
 ```bash
 mkdir -p data/raw
-curl -sL "$(uv run python -c "import tomllib; print(tomllib.load(open('config.toml','rb'))['dataset']['url'])")" -o data/raw/UNSW_NB15_training-set.csv
+for url in $(uv run python -c "import tomllib; print('\n'.join(tomllib.load(open('config.toml','rb'))['dataset']['urls']))"); do
+  curl -sL "$url" -o "data/raw/$(basename "$url")"
+done
 uv run training/train_network_model.py
 uv run training/export_ondevice_model.py
 uv run tests/test_export_matches_model.py

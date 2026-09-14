@@ -19,8 +19,10 @@ jobs:
       - name: Fetch dataset
         run: |
           mkdir -p data/raw
-          URL=$(uv run python -c "import tomllib; print(tomllib.load(open('config.toml','rb'))['dataset']['url'])")
-          curl -sL "$URL" -o data/raw/UNSW_NB15_training-set.csv
+          uv run python -c "import tomllib; print('\n'.join(tomllib.load(open('config.toml','rb'))['dataset']['urls']))" > /tmp/dataset_urls.txt
+          while IFS= read -r URL; do
+            curl -sL "$URL" -o "data/raw/$(basename "$URL")"
+          done < /tmp/dataset_urls.txt
 
       - name: Train
         run: uv run training/train_network_model.py

@@ -1,6 +1,8 @@
 [dataset]
-url = "https://huggingface.co/datasets/Mouwiya/UNSW-NB15/resolve/main/UNSW_NB15_training-set.csv"
-features_url = "https://huggingface.co/datasets/Mouwiya/UNSW-NB15/resolve/main/NUSW-NB15_features.csv"
+urls = [
+    "https://huggingface.co/datasets/Mouwiya/UNSW-NB15/resolve/main/data/train-00000-of-00002.parquet",
+    "https://huggingface.co/datasets/Mouwiya/UNSW-NB15/resolve/main/data/train-00001-of-00002.parquet",
+]
 raw_dir = "data/raw"
 
 [training]
