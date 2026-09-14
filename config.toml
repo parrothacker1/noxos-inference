@@ -1,0 +1,20 @@
+[dataset]
+url = "https://huggingface.co/datasets/Mouwiya/UNSW-NB15/resolve/main/UNSW_NB15_training-set.csv"
+features_url = "https://huggingface.co/datasets/Mouwiya/UNSW-NB15/resolve/main/NUSW-NB15_features.csv"
+raw_dir = "data/raw"
+
+[training]
+test_size = 0.2
+random_state = 42
+n_estimators = 200
+max_depth = 6
+learning_rate = 0.1
+
+[thresholds]
+allow_below = 0.4
+block_above = 0.6
+
+[paths]
+model_out = "service/model_network.joblib"
+metrics_out = "training/METRICS.md"
+ondevice_out = "service/model_ondevice.json"
