@@ -1,25 +1,39 @@
 # Network classifier — feature schema
 
-Trained on [UNSW-NB15](https://research.unsw.edu.au/projects/unsw-nb15-dataset) (`UNSW_NB15_training-set.csv`, fetched from the [Mouwiya/UNSW-NB15 HuggingFace mirror](https://huggingface.co/datasets/Mouwiya/UNSW-NB15) — the official UNSW CloudStor link works too, HuggingFace was just the easiest to script against without an interactive download). Only the training-set file exists in that mirror (no matching testing-set.csv), so the held-out split is our own 80/20 stratified split, not the dataset's original one — see `training/METRICS.md` for the real numbers this produces.
+**Retrained 2026-09-14 against the locked spec in `knowledge-graph/noxos-inference/TASKS.md`'s "Real training spec, LOCKED 2026-09-14"** — supersedes the original 39-feature version trained on the reduced `UNSW_NB15_training-set.csv`. Everything below describes the current, real model.
 
-## Fetching the raw data
+Trained on the full, unreduced [UNSW-NB15](https://research.unsw.edu.au/projects/unsw-nb15-dataset) dataset (2,280,090 rows, ~11% attack rate — closer to Warden's real deployment than the reduced/rebalanced 175K-row file the original model used), fetched as two parquet files from the [Mouwiya/UNSW-NB15 HuggingFace mirror](https://huggingface.co/datasets/Mouwiya/UNSW-NB15):
 
 ```bash
 mkdir -p data/raw
-curl -sL "https://huggingface.co/datasets/Mouwiya/UNSW-NB15/resolve/main/UNSW_NB15_training-set.csv" -o data/raw/UNSW_NB15_training-set.csv
+curl -sL "https://huggingface.co/datasets/Mouwiya/UNSW-NB15/resolve/main/data/train-00000-of-00002.parquet" -o data/raw/train-00000-of-00002.parquet
+curl -sL "https://huggingface.co/datasets/Mouwiya/UNSW-NB15/resolve/main/data/train-00001-of-00002.parquet" -o data/raw/train-00001-of-00002.parquet
 ```
 
-Gitignored (`data/raw/`) — 32MB, re-fetchable, no reason to bloat the repo.
+Gitignored (`data/raw/`), URLs live in `config.toml`'s `[dataset].urls` — the training script and CI workflow both read from there, nothing hardcoded twice. Held-out split is our own 80/20 stratified split (`config.toml`'s `[training]` section), not the dataset's original one.
 
-## Feature columns the model expects
+## Feature columns the model expects — 10 fields, locked, F1 = 0.9724
 
-All UNSW-NB15 columns except `id` (row index), `attack_cat` (would leak the label — it's the specific attack name), and `label` (the target itself). 39 features total, 3 categorical (`proto`, `service`, `state` — label-encoded using categories learned at training time, saved in the model artifact) and the rest numeric flow statistics (`dur`, `spkts`, `dpkts`, `sbytes`, `dbytes`, `rate`, `sttl`, `dttl`, `sload`, `dload`, `sinpkt`, `dinpkt`, `sjit`, `djit`, `tcprtt`, `synack`, `ackdat`, `smean`, `dmean`, `ct_*` connection-count features, etc. — see `data/raw/NUSW-NB15_features.csv` for the dataset's own column descriptions).
+Deliberately not the full 39-column schema — this set was chosen specifically to match what `noxos-app` can realistically supply per flagged destination (see the locked spec for the empirical progression that justified it: 0.9679 → 0.9715 with real `dst_port` → 0.9724 with derived `smean`/`dmean`). Feature names below are what `noxos-app` will send — the raw dataset columns get renamed/derived to match during training, not the other way around, so the exported tree JSON's `feature` strings are directly usable without a translation table on the app side.
+
+| Feature name (what the model/JSON export use) | Raw dataset column | Notes |
+|---|---|---|
+| `proto` | `proto` | categorical, label-encoded (100+ real values in the full dataset — arp/ospf/sctp/icmp/etc., not just tcp/udp) |
+| `dst_port` | `dsport` | **string in the raw data, not numeric** — 7 of 2,280,090 rows have hex (`0xc0a8`) or non-numeric (`-`) values; parsed as decimal first, then `int(x, 16) & 0xFFFF` as fallback, dropped if neither parses |
+| `src_byte_count` | `sbytes` | |
+| `src_packet_count` | `Spkts` | capital P in the full dataset — don't assume it matches the reduced set's lowercase `spkts` |
+| `dst_byte_count` | `dbytes` | |
+| `dst_packet_count` | `Dpkts` | capital D, same note |
+| `duration_millis` | `dur` | **unit conversion**: dataset stores seconds, multiplied by 1000 during training so it matches what `noxos-app` sends in milliseconds |
+| `handshake_latency_millis` | `tcprtt` | same seconds→milliseconds conversion; 0 for non-TCP flows in the raw data (no handshake to time), matching what `noxos-app` sends for UDP |
+| `smean` | derived: `sbytes / Spkts` | mean source-side packet size; 0 when packet count is 0 rather than a division error |
+| `dmean` | derived: `dbytes / Dpkts` | mean destination-side packet size, same zero-guard |
 
 ## Known gap: what `noxos-app` actually sends today
 
-`AnalysisDispatcher` in `noxos-app` only has `ip`/`priority`/`reason`/`first_flagged_epoch_millis` per flagged `AclEntry` — none of the 39 columns above. `service/app.py`'s `/analyze/network` endpoint fills every missing field with a default stored in the model artifact, so a request with none of the real flow fields still gets a real (if low-information) prediction rather than erroring. This means today's actual verdicts are close to whatever the model predicts for a "typical" flow — not meaningfully informed by the specific destination. Closing this gap means either extending `AclEntity`/`AnalysisDispatcher` in `noxos-app` to persist and send real per-flow stats, or accepting that this model is only useful once richer request data exists. See `noxos-inference/AGENTS.md` for the fuller discussion.
+This 10-feature set was chosen to match what `noxos-app` *could* send, not what it *does* send yet — `AnalysisDispatcher` still only has `ip`/`priority`/`reason`/`first_flagged_epoch_millis` per flagged `AclEntry` as of this writing. `service/app.py`'s `/analyze/network` endpoint fills every missing field with a default stored in the model artifact, so a request with none of the real flow fields still gets a real (if low-information) prediction rather than erroring. Closing this gap means `noxos-app` persisting and sending the fields in the table above (some of it — `srcPacketCount`/`srcByteCount`/`dstPacketCount`/`dstByteCount`/`durationMillis`/`handshakeLatencyMillis` — already exists in `AclEntity` schema v8, just not wired into the dispatcher's request body yet; see `../noxos-app/TASKS.md`).
 
-**Defaults are computed from `label == 0` (normal) rows only, not the whole dataset.** First version used the whole dataset's median/mode — an almost-empty request (today's real case) came back `"block"` with a low safety score, because UNSW-NB15's overall column medians happen to resemble attack traffic more than normal traffic (this dataset skews attack-heavy). A security feature defaulting to "block" when it has no real signal is the wrong failure mode — it should lean toward "I don't actually know" rather than confidently wrong. Conditioning defaults on normal-only rows fixes this: an empty request now reads as an unremarkable, typical *normal* flow instead of an unremarkable typical *dataset* row.
+**Defaults are computed from `label == 0` (normal) rows only, not the whole dataset.** An almost-empty request (today's real case) would otherwise read as attack-like, since this dataset's overall column medians skew toward its ~11%-but-still-overrepresented-in-aggregate attack traffic more than a truly random normal flow does. A security feature defaulting to "block" when it has no real signal is the wrong failure mode. Conditioning defaults on normal-only rows fixes this: an empty request reads as a typical *normal* flow.
 
 ## Verdict thresholds and the safety_score polarity fix
 
