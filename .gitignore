@@ -1,13 +1,1 @@
-__pycache__/
-*.pyc
-.venv/
-venv/
-*.egg-info/
-
-# raw dataset downloads — large, re-fetchable, see training/README.md for the fetch command
-data/raw/
-*.csv
-
-.env
-
 CLAUDE.md
