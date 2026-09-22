@@ -6,6 +6,8 @@ import (
 	"math"
 	"net/http"
 	"os"
+
+	"github.com/gin-gonic/gin"
 )
 
 type node struct {
@@ -110,44 +112,44 @@ type server struct {
 	apiKey string
 }
 
-func (s *server) requireAuth(w http.ResponseWriter, r *http.Request) bool {
+func (s *server) requireAuth(c *gin.Context) bool {
 	if s.apiKey == "" {
 		return true
 	}
-	if r.Header.Get("Authorization") != "Bearer "+s.apiKey {
-		http.Error(w, `{"detail":"invalid or missing API key"}`, http.StatusUnauthorized)
+	if c.GetHeader("Authorization") != "Bearer "+s.apiKey {
+		c.JSON(http.StatusUnauthorized, gin.H{"detail": "invalid or missing API key"})
+		c.Abort()
 		return false
 	}
 	return true
 }
 
-func (s *server) health(w http.ResponseWriter, r *http.Request) {
-	json.NewEncoder(w).Encode(map[string]any{
+func (s *server) health(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
 		"status":       "ok",
 		"model_loaded": s.model != nil,
 	})
 }
 
-func (s *server) analyzeNetwork(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAuth(w, r) {
+func (s *server) analyzeNetwork(c *gin.Context) {
+	if !s.requireAuth(c) {
 		return
 	}
 	if s.model == nil {
-		http.Error(w, `{"detail":"model not loaded"}`, http.StatusServiceUnavailable)
+		c.JSON(http.StatusServiceUnavailable, gin.H{"detail": "model not loaded"})
 		return
 	}
 
 	payload := map[string]any{}
-	if r.ContentLength != 0 {
-		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-			http.Error(w, `{"detail":"invalid JSON body"}`, http.StatusBadRequest)
+	if c.Request.ContentLength != 0 {
+		if err := json.NewDecoder(c.Request.Body).Decode(&payload); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"detail": "invalid JSON body"})
 			return
 		}
 	}
 
 	attackProbability := s.model.predict(s.model.encodeRequest(payload))
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{
+	c.JSON(http.StatusOK, gin.H{
 		"verdict":      bucketVerdict(attackProbability),
 		"safety_score": math.Round((1.0-attackProbability)*10000) / 10000,
 		"reasoning":    nil,
@@ -165,13 +167,13 @@ func main() {
 	}
 
 	s := &server{model: m, apiKey: os.Getenv("NOXOS_INFERENCE_API_KEY")}
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", s.health)
-	mux.HandleFunc("POST /analyze/network", s.analyzeNetwork)
+	router := gin.Default()
+	router.GET("/health", s.health)
+	router.POST("/analyze/network", s.analyzeNetwork)
 
 	addr := ":" + envOr("PORT", "8080")
 	log.Printf("listening on %s (model=%s)", addr, modelPath)
-	log.Fatal(http.ListenAndServe(addr, mux))
+	log.Fatal(router.Run(addr))
 }
 
 func envOr(key, fallback string) string {
