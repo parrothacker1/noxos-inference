@@ -1,0 +1,80 @@
+name: Retrain and publish student model
+
+on:
+  workflow_dispatch: {}
+  workflow_run:
+    workflows: ["Train and publish teacher model"]
+    types: [completed]
+
+permissions:
+  contents: write
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: student-xgboost
+
+      - uses: astral-sh/setup-uv@v5
+
+      - working-directory: training
+        run: uv sync
+
+      - name: Fetch teacher's out-of-fold predictions
+        working-directory: training
+        run: |
+          mkdir -p data
+          gh release download teacher-latest --repo "$GITHUB_REPOSITORY" \
+            --pattern oof_predictions.parquet --pattern oof_predictions.parquet.sha256 \
+            --dir data --clobber
+          cd data
+          sha256sum -c oof_predictions.parquet.sha256
+          mv oof_predictions.parquet teacher_oof.parquet
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Train student
+        working-directory: training
+        run: uv run train_student.py
+
+      - name: Export on-device model
+        working-directory: training
+        run: uv run export_student_model.py
+
+      - name: Verify export matches the trained model
+        working-directory: training
+        run: uv run test_export.py
+
+      - name: Build release assets
+        id: assets
+        working-directory: training
+        run: |
+          VERSION=$(date +%s)
+          cp models/student_ondevice.json model.json
+          SHA256=$(sha256sum model.json | cut -d' ' -f1)
+          echo "$SHA256  model.json" > model.json.sha256
+          printf '{"version": %s, "sha256": "%s", "modelUrl": "https://github.com/%s/releases/download/student-latest/model.json"}' \
+            "$VERSION" "$SHA256" "$GITHUB_REPOSITORY" > manifest.json
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Publish rolling "latest" release
+        working-directory: training
+        run: |
+          gh release delete student-latest --yes --cleanup-tag || true
+          gh release create student-latest model.json manifest.json model.json.sha256 METRICS.md \
+            --title "On-device student model (latest)" \
+            --notes "Distilled from teacher-latest, automated run, version ${{ steps.assets.outputs.version }}."
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Publish versioned release
+        working-directory: training
+        run: |
+          gh release create "student-${{ steps.assets.outputs.version }}" model.json manifest.json model.json.sha256 METRICS.md \
+            --title "On-device student model v${{ steps.assets.outputs.version }}" \
+            --notes "Distilled from teacher-latest, automated run."
+        env:
+          GH_TOKEN: ${{ github.token }}

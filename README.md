@@ -6,11 +6,14 @@ The Warden threat-analysis inference backend for [NoxOS](https://github.com/parr
 
 ## Where the code actually is
 
-- **`xgboost-classifier`** — the on-device network-traffic classifier: dataset prep, training (`training/`), the on-device JSON export, the FastAPI service (`service/`), its tests, EC2 deploy scripts (`infra/`). `.github/workflows/train-ondevice-model.yml` (on this branch, `main`) checks this branch out and runs its training pipeline, publishing results as GitHub Releases tagged `ondevice-model-*`.
-- **`feature/ml-server-architecture`** — the heavier server-side ML workload, architecture still being figured out. Will get its own workflow on `main` once there's something real to run, with its own distinct release-tag prefix so it never collides with `ondevice-model-*`.
+- **`teacher-xgboost`** — the server-side teacher: a 5-fold `StratifiedGroupKFold` XGBoost ensemble on the full UNSW-NB15 dataset, producing leak-free out-of-fold attack-probability predictions used as the distillation target for the student model.
+- **`student-xgboost`** — the lightweight on-device student, distilled from the teacher's out-of-fold predictions via regression, exported to the same on-device tree-JSON contract.
+- **`teacher-server`** — a Go (gin) serving layer for the tree-JSON model export contract.
+- **`filter-autoencoder`** — reserved for a future unsupervised anomaly-detection tier ahead of the classifier. Branch exists, no code yet — deliberately deferred.
 
 ## Workflows on this branch
 
-- **`train-ondevice-model.yml`** (manual `workflow_dispatch` only) — checks out `xgboost-classifier`, trains the network classifier on the full UNSW-NB15 dataset, exports it to the on-device JSON tree format, verifies the export matches the trained model, and publishes both a rolling `ondevice-model-latest` release (what `noxos-app`'s `ModelUpdateManager` actually polls) and a permanent timestamped release per run for history.
+- **`train-teacher.yml`** (manual `workflow_dispatch`) — checks out `teacher-xgboost`, trains the 5-fold teacher ensemble on the full UNSW-NB15 dataset, and publishes the out-of-fold predictions as a rolling `teacher-latest` release (plus a timestamped `teacher-<version>` release for history).
+- **`train-student.yml`** (manual `workflow_dispatch`, or automatically via `workflow_run` whenever `train-teacher.yml` completes successfully) — checks out `student-xgboost`, downloads `teacher-latest`'s out-of-fold predictions, distills the student model, exports it to the on-device JSON format, verifies the export against the real model, and publishes a rolling `student-latest` release (plus a timestamped `student-<version>` release) — this is what a model consumer should actually poll.
 
-See `xgboost-classifier`'s own `README.md` and `CLAUDE.md` for everything else — local dev setup, retraining instructions, the FastAPI service, deployment.
+See each topic branch's own `README.md`/`CLAUDE.md` for local dev setup, retraining instructions, and deployment.

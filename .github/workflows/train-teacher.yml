@@ -1,0 +1,63 @@
+name: Train and publish teacher model
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: teacher-xgboost
+
+      - uses: astral-sh/setup-uv@v5
+
+      - working-directory: training
+        run: uv sync
+
+      - name: Fetch dataset
+        working-directory: training
+        run: |
+          mkdir -p ../data/raw
+          uv run python -c "import tomllib; print('\n'.join(tomllib.load(open('config.toml','rb'))['dataset']['urls']))" > /tmp/dataset_urls.txt
+          while IFS= read -r URL; do
+            curl -sL "$URL" -o "../data/raw/$(basename "$URL")"
+          done < /tmp/dataset_urls.txt
+
+      - name: Train teacher ensemble
+        working-directory: training
+        run: uv run train_teacher.py
+
+      - name: Build release assets
+        id: assets
+        working-directory: training
+        run: |
+          VERSION=$(date +%s)
+          SHA256=$(sha256sum models/oof_predictions.parquet | cut -d' ' -f1)
+          echo "$SHA256  oof_predictions.parquet" > oof_predictions.parquet.sha256
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Publish rolling "latest" release
+        working-directory: training
+        run: |
+          gh release delete teacher-latest --yes --cleanup-tag || true
+          gh release create teacher-latest \
+            models/oof_predictions.parquet oof_predictions.parquet.sha256 METRICS.md \
+            --title "Teacher ensemble (latest)" \
+            --notes "Automated training run, version ${{ steps.assets.outputs.version }}."
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Publish versioned release
+        working-directory: training
+        run: |
+          gh release create "teacher-${{ steps.assets.outputs.version }}" \
+            models/oof_predictions.parquet oof_predictions.parquet.sha256 METRICS.md \
+            --title "Teacher ensemble v${{ steps.assets.outputs.version }}" \
+            --notes "Automated training run."
+        env:
+          GH_TOKEN: ${{ github.token }}
