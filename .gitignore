@@ -1,1 +1,6 @@
 CLAUDE.md
+data/raw/
+training/.venv/
+training/models/
+training/__pycache__/
+
