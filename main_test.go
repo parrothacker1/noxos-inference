@@ -49,3 +49,16 @@ func TestPredictAndVerdictBucketing(t *testing.T) {
 		t.Errorf("sigmoid(1000): got %v, want ~1.0", sigmoid(1000))
 	}
 }
+
+func TestEvalTreeUsesFloat32Comparison(t *testing.T) {
+	leafLow, leafHigh := -1.0, 1.0
+	n := &node{Feature: "duration_millis", Threshold: 0.00100000005,
+		Left:  &node{Leaf: &leafLow},
+		Right: &node{Leaf: &leafHigh}}
+
+	got := evalTree(n, map[string]float64{"duration_millis": 0.001})
+	if got != leafHigh {
+		t.Errorf("float64(0.001) < float64(0.00100000005) is true, but float32(0.001) == float32(0.00100000005) "+
+			"— XGBoost compares in float32, so this must land right (%v), got %v", leafHigh, got)
+	}
+}

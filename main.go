@@ -45,7 +45,7 @@ func evalTree(n *node, features map[string]float64) float64 {
 	value, ok := features[n.Feature]
 	goLeft := n.DefaultLeft
 	if ok {
-		goLeft = value < n.Threshold
+		goLeft = float32(value) < float32(n.Threshold)
 	}
 	if goLeft {
 		return evalTree(n.Left, features)
