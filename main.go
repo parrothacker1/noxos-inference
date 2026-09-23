@@ -1,11 +1,18 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"io"
 	"log"
 	"math"
 	"net/http"
 	"os"
+	"strconv"
+	"sync/atomic"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -30,6 +37,53 @@ func loadModel(path string) (*model, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
+	}
+	var m model
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil, err
+	}
+	return &m, nil
+}
+
+type manifest struct {
+	Version  int64  `json:"version"`
+	SHA256   string `json:"sha256"`
+	ModelURL string `json:"modelUrl"`
+}
+
+func fetchManifest(client *http.Client, url string) (*manifest, error) {
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("manifest fetch: unexpected status %d", resp.StatusCode)
+	}
+	var m manifest
+	if err := json.NewDecoder(resp.Body).Decode(&m); err != nil {
+		return nil, err
+	}
+	return &m, nil
+}
+
+func fetchModelVerified(client *http.Client, url, expectedSHA256 string) (*model, error) {
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("model fetch: unexpected status %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256(data)
+	got := hex.EncodeToString(sum[:])
+	if got != expectedSHA256 {
+		return nil, fmt.Errorf("sha256 mismatch: manifest says %s, downloaded bytes hash to %s", expectedSHA256, got)
 	}
 	var m model
 	if err := json.Unmarshal(data, &m); err != nil {
@@ -107,9 +161,38 @@ func bucketVerdict(attackProbability float64) string {
 	}
 }
 
+type loadedInfo struct {
+	Version int64
+	SHA256  string
+}
+
 type server struct {
-	model  *model
-	apiKey string
+	currentModel atomic.Pointer[model]
+	currentInfo  atomic.Pointer[loadedInfo]
+	apiKey       string
+	manifestURL  string
+	httpClient   *http.Client
+}
+
+func (s *server) reloadIfChanged() (bool, *loadedInfo, error) {
+	if s.manifestURL == "" {
+		return false, nil, fmt.Errorf("no manifest URL configured")
+	}
+	m, err := fetchManifest(s.httpClient, s.manifestURL)
+	if err != nil {
+		return false, nil, err
+	}
+	if current := s.currentInfo.Load(); current != nil && current.SHA256 == m.SHA256 {
+		return false, current, nil
+	}
+	newModel, err := fetchModelVerified(s.httpClient, m.ModelURL, m.SHA256)
+	if err != nil {
+		return false, nil, err
+	}
+	info := &loadedInfo{Version: m.Version, SHA256: m.SHA256}
+	s.currentModel.Store(newModel)
+	s.currentInfo.Store(info)
+	return true, info, nil
 }
 
 func (s *server) requireAuth(c *gin.Context) bool {
@@ -125,17 +208,41 @@ func (s *server) requireAuth(c *gin.Context) bool {
 }
 
 func (s *server) health(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{
+	info := s.currentInfo.Load()
+	body := gin.H{
 		"status":       "ok",
-		"model_loaded": s.model != nil,
-	})
+		"model_loaded": s.currentModel.Load() != nil,
+	}
+	if info != nil {
+		body["version"] = info.Version
+		body["sha256"] = info.SHA256
+	}
+	c.JSON(http.StatusOK, body)
+}
+
+func (s *server) reload(c *gin.Context) {
+	if !s.requireAuth(c) {
+		return
+	}
+	changed, info, err := s.reloadIfChanged()
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"detail": err.Error()})
+		return
+	}
+	body := gin.H{"changed": changed}
+	if info != nil {
+		body["version"] = info.Version
+		body["sha256"] = info.SHA256
+	}
+	c.JSON(http.StatusOK, body)
 }
 
 func (s *server) analyzeNetwork(c *gin.Context) {
 	if !s.requireAuth(c) {
 		return
 	}
-	if s.model == nil {
+	m := s.currentModel.Load()
+	if m == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"detail": "model not loaded"})
 		return
 	}
@@ -148,7 +255,7 @@ func (s *server) analyzeNetwork(c *gin.Context) {
 		}
 	}
 
-	attackProbability := s.model.predict(s.model.encodeRequest(payload))
+	attackProbability := m.predict(m.encodeRequest(payload))
 	c.JSON(http.StatusOK, gin.H{
 		"verdict":      bucketVerdict(attackProbability),
 		"safety_score": math.Round((1.0-attackProbability)*10000) / 10000,
@@ -157,22 +264,58 @@ func (s *server) analyzeNetwork(c *gin.Context) {
 }
 
 func main() {
-	modelPath := os.Getenv("NOXOS_MODEL_PATH")
-	if modelPath == "" {
-		modelPath = "model.json"
-	}
-	m, err := loadModel(modelPath)
-	if err != nil {
-		log.Printf("model not loaded from %s: %v (starting anyway, /health will report it)", modelPath, err)
+	s := &server{
+		apiKey:      os.Getenv("NOXOS_INFERENCE_API_KEY"),
+		manifestURL: os.Getenv("NOXOS_MANIFEST_URL"),
+		httpClient:  &http.Client{Timeout: 30 * time.Second},
 	}
 
-	s := &server{model: m, apiKey: os.Getenv("NOXOS_INFERENCE_API_KEY")}
+	if s.manifestURL != "" {
+		if _, info, err := s.reloadIfChanged(); err != nil {
+			log.Printf("initial model load from manifest %s failed: %v (starting anyway, /health will report it)", s.manifestURL, err)
+		} else {
+			log.Printf("loaded model version=%d sha256=%s from manifest", info.Version, info.SHA256)
+		}
+	} else {
+		modelPath := envOr("NOXOS_MODEL_PATH", "model.json")
+		m, err := loadModel(modelPath)
+		if err != nil {
+			log.Printf("model not loaded from %s: %v (starting anyway, /health will report it)", modelPath, err)
+		} else {
+			data, _ := os.ReadFile(modelPath)
+			sum := sha256.Sum256(data)
+			s.currentModel.Store(m)
+			s.currentInfo.Store(&loadedInfo{Version: 0, SHA256: hex.EncodeToString(sum[:])})
+			log.Printf("loaded model from local file %s", modelPath)
+		}
+	}
+
+	if s.manifestURL != "" {
+		if intervalSeconds, err := strconv.Atoi(envOr("NOXOS_RELOAD_INTERVAL_SECONDS", "300")); err == nil && intervalSeconds > 0 {
+			go func() {
+				ticker := time.NewTicker(time.Duration(intervalSeconds) * time.Second)
+				defer ticker.Stop()
+				for range ticker.C {
+					changed, info, err := s.reloadIfChanged()
+					if err != nil {
+						log.Printf("periodic reload check failed: %v", err)
+						continue
+					}
+					if changed {
+						log.Printf("reloaded model version=%d sha256=%s", info.Version, info.SHA256)
+					}
+				}
+			}()
+		}
+	}
+
 	router := gin.Default()
 	router.GET("/health", s.health)
+	router.POST("/reload", s.reload)
 	router.POST("/analyze/network", s.analyzeNetwork)
 
 	addr := ":" + envOr("PORT", "8080")
-	log.Printf("listening on %s (model=%s)", addr, modelPath)
+	log.Printf("listening on %s", addr)
 	log.Fatal(router.Run(addr))
 }
 
