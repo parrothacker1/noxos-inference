@@ -28,17 +28,33 @@ jobs:
             curl -sL "$URL" -o "../data/raw/$(basename "$URL")"
           done < /tmp/dataset_urls.txt
 
-      - name: Train teacher ensemble
+      - name: Train teacher ensemble (OOF targets for the student)
         working-directory: training
         run: uv run train_teacher.py
+
+      - name: Train production teacher (full-data, for teacher-server)
+        working-directory: training
+        run: uv run train_teacher_production.py
+
+      - name: Export production teacher to on-device JSON
+        working-directory: training
+        run: uv run export_teacher_model.py
+
+      - name: Verify export matches the trained model
+        working-directory: training
+        run: uv run test_export.py
 
       - name: Build release assets
         id: assets
         working-directory: training
         run: |
           VERSION=$(date +%s)
-          SHA256=$(sha256sum models/oof_predictions.parquet | cut -d' ' -f1)
-          echo "$SHA256  oof_predictions.parquet" > oof_predictions.parquet.sha256
+          cp models/teacher_ondevice.json model.json
+          SHA256=$(sha256sum model.json | cut -d' ' -f1)
+          echo "$SHA256  model.json" > model.json.sha256
+          printf '{"version": %s, "sha256": "%s", "modelUrl": "https://github.com/%s/releases/download/teacher-latest/model.json"}' \
+            "$VERSION" "$SHA256" "$GITHUB_REPOSITORY" > manifest.json
+          (cd models && sha256sum oof_predictions.parquet) > oof_predictions.parquet.sha256
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Publish rolling "latest" release
@@ -46,8 +62,9 @@ jobs:
         run: |
           gh release delete teacher-latest --yes --cleanup-tag || true
           gh release create teacher-latest \
+            model.json manifest.json model.json.sha256 \
             models/oof_predictions.parquet oof_predictions.parquet.sha256 METRICS.md \
-            --title "Teacher ensemble (latest)" \
+            --title "Teacher model (latest)" \
             --notes "Automated training run, version ${{ steps.assets.outputs.version }}."
         env:
           GH_TOKEN: ${{ github.token }}
@@ -56,8 +73,9 @@ jobs:
         working-directory: training
         run: |
           gh release create "teacher-${{ steps.assets.outputs.version }}" \
+            model.json manifest.json model.json.sha256 \
             models/oof_predictions.parquet oof_predictions.parquet.sha256 METRICS.md \
-            --title "Teacher ensemble v${{ steps.assets.outputs.version }}" \
+            --title "Teacher model v${{ steps.assets.outputs.version }}" \
             --notes "Automated training run."
         env:
           GH_TOKEN: ${{ github.token }}

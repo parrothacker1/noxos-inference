@@ -13,7 +13,7 @@ The Warden threat-analysis inference backend for [NoxOS](https://github.com/parr
 
 ## Workflows on this branch
 
-- **`train-teacher.yml`** (manual `workflow_dispatch`) — checks out `teacher-xgboost`, trains the 5-fold teacher ensemble on the full UNSW-NB15 dataset, and publishes the out-of-fold predictions as a rolling `teacher-latest` release (plus a timestamped `teacher-<version>` release for history).
+- **`train-teacher.yml`** (manual `workflow_dispatch`) — checks out `teacher-xgboost`, trains the 5-fold teacher ensemble on the full UNSW-NB15 dataset (out-of-fold predictions, the student's distillation target), *and* trains a separate full-data production teacher exported to the on-device JSON contract — this is the real servable model `teacher-server` dynamically loads. Publishes both as a rolling `teacher-latest` release (plus a timestamped `teacher-<version>` release for history).
 - **`train-student.yml`** (manual `workflow_dispatch`, or automatically via `workflow_run` whenever `train-teacher.yml` completes successfully) — checks out `student-xgboost`, downloads `teacher-latest`'s out-of-fold predictions, distills the student model, exports it to the on-device JSON format, verifies the export against the real model, and publishes a rolling `student-latest` release (plus a timestamped `student-<version>` release) — this is what a model consumer should actually poll.
 
 See each topic branch's own `README.md`/`CLAUDE.md` for local dev setup, retraining instructions, and deployment.
