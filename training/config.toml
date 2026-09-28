@@ -1,0 +1,23 @@
+[dataset]
+urls = [
+    "https://huggingface.co/datasets/Mouwiya/UNSW-NB15/resolve/main/data/train-00000-of-00002.parquet",
+    "https://huggingface.co/datasets/Mouwiya/UNSW-NB15/resolve/main/data/train-00001-of-00002.parquet",
+]
+raw_dir = "data/raw"
+
+[training]
+n_splits = 5
+random_state = 42
+hidden_dim = 32
+bottleneck_dim = 4
+epochs = 60
+batch_size = 512
+learning_rate = 0.001
+proto_top_n = 6
+threshold_percentile = 92
+
+[paths]
+models_dir = "models"
+model_out = "models/autoencoder.pt"
+ondevice_out = "models/autoencoder_ondevice.json"
+metrics_out = "METRICS.md"
