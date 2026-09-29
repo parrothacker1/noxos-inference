@@ -8,13 +8,14 @@ from config import REPO_ROOT, TRAINING_DIR, load_config
 
 def transform_node(node: dict) -> dict:
     if "leaf" in node:
-        return {"leaf": node["leaf"]}
+        return {"leaf": node["leaf"], "cover": node["cover"]}
 
     children_by_id = {child["nodeid"]: child for child in node["children"]}
     return {
         "feature": node["split"],
         "threshold": node["split_condition"],
         "default_left": node["missing"] == node["yes"],
+        "cover": node["cover"],
         "left": transform_node(children_by_id[node["yes"]]),
         "right": transform_node(children_by_id[node["no"]]),
     }
@@ -22,7 +23,7 @@ def transform_node(node: dict) -> dict:
 
 def export(model_bundle: dict) -> dict:
     booster = model_bundle["model"].get_booster()
-    trees = [transform_node(json.loads(t)) for t in booster.get_dump(dump_format="json", with_stats=False)]
+    trees = [transform_node(json.loads(t)) for t in booster.get_dump(dump_format="json", with_stats=True)]
 
     cfg = json.loads(booster.save_config())
     base_score_prob = float(cfg["learner"]["learner_model_param"]["base_score"].strip("[]"))
@@ -36,6 +37,7 @@ def export(model_bundle: dict) -> dict:
     return {
         "base_score": base_score_margin,
         "feature_defaults": feature_defaults,
+        "feature_scale": model_bundle["numeric_scale"],
         "trees": trees,
         "categories": categories,
     }
