@@ -173,33 +173,95 @@ type loadedInfo struct {
 	SHA256  string
 }
 
-type server struct {
-	currentModel atomic.Pointer[model]
-	currentInfo  atomic.Pointer[loadedInfo]
-	apiKey       string
-	manifestURL  string
-	httpClient   *http.Client
+type slot struct {
+	name        string
+	manifestURL string
+	localPath   string
+	model       atomic.Pointer[model]
+	info        atomic.Pointer[loadedInfo]
 }
 
-func (s *server) reloadIfChanged() (bool, *loadedInfo, error) {
-	if s.manifestURL == "" {
-		return false, nil, fmt.Errorf("no manifest URL configured")
+func (sl *slot) configured() bool {
+	return sl.manifestURL != "" || sl.localPath != ""
+}
+
+func (sl *slot) reloadIfChanged(client *http.Client) (bool, *loadedInfo, error) {
+	if sl.manifestURL == "" {
+		return false, nil, fmt.Errorf("no manifest URL configured for the %s model", sl.name)
 	}
-	m, err := fetchManifest(s.httpClient, s.manifestURL)
+	m, err := fetchManifest(client, sl.manifestURL)
 	if err != nil {
 		return false, nil, err
 	}
-	if current := s.currentInfo.Load(); current != nil && current.SHA256 == m.SHA256 {
+	if current := sl.info.Load(); current != nil && current.SHA256 == m.SHA256 {
 		return false, current, nil
 	}
-	newModel, err := fetchModelVerified(s.httpClient, m.ModelURL, m.SHA256)
+	newModel, err := fetchModelVerified(client, m.ModelURL, m.SHA256)
 	if err != nil {
 		return false, nil, err
 	}
 	info := &loadedInfo{Version: m.Version, SHA256: m.SHA256}
-	s.currentModel.Store(newModel)
-	s.currentInfo.Store(info)
+	sl.model.Store(newModel)
+	sl.info.Store(info)
 	return true, info, nil
+}
+
+func (sl *slot) loadInitial(client *http.Client) {
+	switch {
+	case sl.manifestURL != "":
+		if _, info, err := sl.reloadIfChanged(client); err != nil {
+			log.Printf("initial %s model load from manifest %s failed: %v (starting anyway, /health will report it)", sl.name, sl.manifestURL, err)
+		} else {
+			log.Printf("loaded %s model version=%d sha256=%s from manifest", sl.name, info.Version, info.SHA256)
+		}
+	case sl.localPath != "":
+		m, err := loadModel(sl.localPath)
+		if err != nil {
+			log.Printf("%s model not loaded from %s: %v (starting anyway, /health will report it)", sl.name, sl.localPath, err)
+			return
+		}
+		data, _ := os.ReadFile(sl.localPath)
+		sum := sha256.Sum256(data)
+		sl.model.Store(m)
+		sl.info.Store(&loadedInfo{Version: 0, SHA256: hex.EncodeToString(sum[:])})
+		log.Printf("loaded %s model from local file %s", sl.name, sl.localPath)
+	}
+}
+
+func (sl *slot) startPeriodicReload(client *http.Client, interval time.Duration) {
+	if sl.manifestURL == "" {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for range ticker.C {
+			changed, info, err := sl.reloadIfChanged(client)
+			if err != nil {
+				log.Printf("periodic %s reload check failed: %v", sl.name, err)
+				continue
+			}
+			if changed {
+				log.Printf("reloaded %s model version=%d sha256=%s", sl.name, info.Version, info.SHA256)
+			}
+		}
+	}()
+}
+
+func (sl *slot) status() gin.H {
+	body := gin.H{"loaded": sl.model.Load() != nil}
+	if info := sl.info.Load(); info != nil {
+		body["version"] = info.Version
+		body["sha256"] = info.SHA256
+	}
+	return body
+}
+
+type server struct {
+	network    *slot
+	file       *slot
+	apiKey     string
+	httpClient *http.Client
 }
 
 func (s *server) requireAuth(c *gin.Context) bool {
@@ -215,15 +277,11 @@ func (s *server) requireAuth(c *gin.Context) bool {
 }
 
 func (s *server) health(c *gin.Context) {
-	info := s.currentInfo.Load()
-	body := gin.H{
-		"status":       "ok",
-		"model_loaded": s.currentModel.Load() != nil,
-	}
-	if info != nil {
-		body["version"] = info.Version
-		body["sha256"] = info.SHA256
-	}
+	body := s.network.status()
+	body["status"] = "ok"
+	body["model_loaded"] = body["loaded"]
+	delete(body, "loaded")
+	body["file_model"] = s.file.status()
 	c.JSON(http.StatusOK, body)
 }
 
@@ -231,7 +289,7 @@ func (s *server) reload(c *gin.Context) {
 	if !s.requireAuth(c) {
 		return
 	}
-	changed, info, err := s.reloadIfChanged()
+	changed, info, err := s.network.reloadIfChanged(s.httpClient)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"detail": err.Error()})
 		return
@@ -241,6 +299,19 @@ func (s *server) reload(c *gin.Context) {
 		body["version"] = info.Version
 		body["sha256"] = info.SHA256
 	}
+	if s.file.manifestURL != "" {
+		fileChanged, fileInfo, fileErr := s.file.reloadIfChanged(s.httpClient)
+		if fileErr != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"detail": fileErr.Error(), "network": body})
+			return
+		}
+		fileBody := gin.H{"changed": fileChanged}
+		if fileInfo != nil {
+			fileBody["version"] = fileInfo.Version
+			fileBody["sha256"] = fileInfo.SHA256
+		}
+		body["file_model"] = fileBody
+	}
 	c.JSON(http.StatusOK, body)
 }
 
@@ -248,7 +319,7 @@ func (s *server) analyzeNetwork(c *gin.Context) {
 	if !s.requireAuth(c) {
 		return
 	}
-	m := s.currentModel.Load()
+	m := s.network.model.Load()
 	if m == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"detail": "model not loaded"})
 		return
@@ -277,55 +348,29 @@ func (s *server) analyzeNetwork(c *gin.Context) {
 }
 
 func main() {
+	networkLocal := ""
+	if os.Getenv("NOXOS_MANIFEST_URL") == "" {
+		networkLocal = envOr("NOXOS_MODEL_PATH", "model.json")
+	}
 	s := &server{
-		apiKey:      os.Getenv("NOXOS_INFERENCE_API_KEY"),
-		manifestURL: os.Getenv("NOXOS_MANIFEST_URL"),
-		httpClient:  &http.Client{Timeout: 30 * time.Second},
+		network:    &slot{name: "network", manifestURL: os.Getenv("NOXOS_MANIFEST_URL"), localPath: networkLocal},
+		file:       &slot{name: "file", manifestURL: os.Getenv("NOXOS_FILE_MANIFEST_URL"), localPath: os.Getenv("NOXOS_FILE_MODEL_PATH")},
+		apiKey:     os.Getenv("NOXOS_INFERENCE_API_KEY"),
+		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}
 
-	if s.manifestURL != "" {
-		if _, info, err := s.reloadIfChanged(); err != nil {
-			log.Printf("initial model load from manifest %s failed: %v (starting anyway, /health will report it)", s.manifestURL, err)
-		} else {
-			log.Printf("loaded model version=%d sha256=%s from manifest", info.Version, info.SHA256)
-		}
-	} else {
-		modelPath := envOr("NOXOS_MODEL_PATH", "model.json")
-		m, err := loadModel(modelPath)
-		if err != nil {
-			log.Printf("model not loaded from %s: %v (starting anyway, /health will report it)", modelPath, err)
-		} else {
-			data, _ := os.ReadFile(modelPath)
-			sum := sha256.Sum256(data)
-			s.currentModel.Store(m)
-			s.currentInfo.Store(&loadedInfo{Version: 0, SHA256: hex.EncodeToString(sum[:])})
-			log.Printf("loaded model from local file %s", modelPath)
-		}
+	s.network.loadInitial(s.httpClient)
+	if s.file.configured() {
+		s.file.loadInitial(s.httpClient)
 	}
 
-	if s.manifestURL != "" {
-		if intervalSeconds, err := strconv.Atoi(envOr("NOXOS_RELOAD_INTERVAL_SECONDS", "300")); err == nil && intervalSeconds > 0 {
-			go func() {
-				ticker := time.NewTicker(time.Duration(intervalSeconds) * time.Second)
-				defer ticker.Stop()
-				for range ticker.C {
-					changed, info, err := s.reloadIfChanged()
-					if err != nil {
-						log.Printf("periodic reload check failed: %v", err)
-						continue
-					}
-					if changed {
-						log.Printf("reloaded model version=%d sha256=%s", info.Version, info.SHA256)
-					}
-				}
-			}()
-		}
+	if intervalSeconds, err := strconv.Atoi(envOr("NOXOS_RELOAD_INTERVAL_SECONDS", "300")); err == nil && intervalSeconds > 0 {
+		interval := time.Duration(intervalSeconds) * time.Second
+		s.network.startPeriodicReload(s.httpClient, interval)
+		s.file.startPeriodicReload(s.httpClient, interval)
 	}
 
-	router := gin.Default()
-	router.GET("/health", s.health)
-	router.POST("/reload", s.reload)
-	router.POST("/analyze/network", s.analyzeNetwork)
+	router := s.router()
 
 	addr := ":" + envOr("PORT", "8080")
 	log.Printf("listening on %s", addr)

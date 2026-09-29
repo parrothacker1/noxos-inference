@@ -76,40 +76,41 @@ func TestReloadIfChangedSwapsModelAndRejectsBadSha256(t *testing.T) {
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
-	s := &server{manifestURL: ts.URL + "/manifest.json", httpClient: &http.Client{Timeout: 5 * time.Second}}
+	sl := &slot{name: "network", manifestURL: ts.URL + "/manifest.json"}
+	client := &http.Client{Timeout: 5 * time.Second}
 
 	currentModelBytes = modelAJSON
 	manifestSHA = shaOf(modelAJSON)
-	changed, info, err := s.reloadIfChanged()
+	changed, info, err := sl.reloadIfChanged(client)
 	if err != nil || !changed || info.SHA256 != manifestSHA {
 		t.Fatalf("initial load: changed=%v info=%v err=%v", changed, info, err)
 	}
-	if got := s.currentModel.Load().predict(nil); got != sigmoid(-3.0) {
+	if got := sl.model.Load().predict(nil); got != sigmoid(-3.0) {
 		t.Errorf("expected modelA's prediction, got %v", got)
 	}
 
-	changed, _, err = s.reloadIfChanged()
+	changed, _, err = sl.reloadIfChanged(client)
 	if err != nil || changed {
 		t.Fatalf("re-fetching the same manifest should report no change: changed=%v err=%v", changed, err)
 	}
 
 	currentModelBytes = modelBJSON
 	manifestSHA = shaOf(modelBJSON)
-	changed, info, err = s.reloadIfChanged()
+	changed, info, err = sl.reloadIfChanged(client)
 	if err != nil || !changed || info.SHA256 != manifestSHA {
 		t.Fatalf("swap to modelB: changed=%v info=%v err=%v", changed, info, err)
 	}
-	if got := s.currentModel.Load().predict(nil); got != sigmoid(3.0) {
+	if got := sl.model.Load().predict(nil); got != sigmoid(3.0) {
 		t.Errorf("expected modelB's prediction after swap, got %v", got)
 	}
 
 	currentModelBytes = modelBJSON
 	manifestSHA = "0000000000000000000000000000000000000000000000000000000000000000"
-	_, _, err = s.reloadIfChanged()
+	_, _, err = sl.reloadIfChanged(client)
 	if err == nil {
 		t.Fatal("expected an error when the manifest's declared sha256 doesn't match the downloaded bytes")
 	}
-	if got := s.currentModel.Load().predict(nil); got != sigmoid(3.0) {
+	if got := sl.model.Load().predict(nil); got != sigmoid(3.0) {
 		t.Errorf("a rejected reload must leave the last-good model in place, got %v", got)
 	}
 }
