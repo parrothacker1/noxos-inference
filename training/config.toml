@@ -23,6 +23,15 @@ categorical_top_n = 6
 threshold_percentile_min = 70
 threshold_percentile_max = 99
 
+[device_log]
+def = 1
+threshold_percentile = 99
+holdout_fraction = 0.4
+min_records = 20000
+model_prefix = "models/autoencoder_device"
+metrics_out = "METRICS_device.md"
+anomaly_log = ""
+
 [paths]
 models_dir = "models"
 model_out = "models/autoencoder.pt"

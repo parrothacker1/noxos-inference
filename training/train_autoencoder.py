@@ -55,6 +55,32 @@ def sweep_thresholds(errors: np.ndarray, y: np.ndarray, low: int, high: int) -> 
     return rows
 
 
+def fit(x_train: torch.Tensor, categorical_dims: list[int], train_cfg: dict) -> Autoencoder:
+    torch.manual_seed(train_cfg["random_state"])
+    model = Autoencoder(
+        numeric_dim=len(NUMERIC_COLUMNS),
+        categorical_dims=categorical_dims,
+        hidden_dim=train_cfg["hidden_dim"],
+        bottleneck_dim=train_cfg["bottleneck_dim"],
+    )
+    optimizer = torch.optim.Adam(model.parameters(), lr=train_cfg["learning_rate"])
+    loader = DataLoader(TensorDataset(x_train), batch_size=train_cfg["batch_size"], shuffle=True)
+
+    for epoch in range(train_cfg["epochs"]):
+        model.train()
+        epoch_loss = 0.0
+        for (x_batch,) in loader:
+            numeric_recon, logits = model(x_batch)
+            numeric_true, idx = split_targets(x_batch, model.numeric_dim, model.categorical_dims)
+            loss = reconstruction_error(numeric_recon, numeric_true, logits, idx).mean()
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            epoch_loss += loss.item() * len(x_batch)
+        print(f"epoch {epoch + 1}/{train_cfg['epochs']}: mean training loss {epoch_loss / len(x_train):.4f}", file=sys.stderr)
+    return model
+
+
 def main():
     config = load_config()
     raw_dir = REPO_ROOT / config["dataset"]["raw_dir"]
@@ -84,28 +110,7 @@ def main():
 
     x_train = torch.from_numpy(encode(normal_train_df, mean, std, categories))
 
-    torch.manual_seed(train_cfg["random_state"])
-    model = Autoencoder(
-        numeric_dim=len(NUMERIC_COLUMNS),
-        categorical_dims=categorical_dims,
-        hidden_dim=train_cfg["hidden_dim"],
-        bottleneck_dim=train_cfg["bottleneck_dim"],
-    )
-    optimizer = torch.optim.Adam(model.parameters(), lr=train_cfg["learning_rate"])
-    loader = DataLoader(TensorDataset(x_train), batch_size=train_cfg["batch_size"], shuffle=True)
-
-    for epoch in range(train_cfg["epochs"]):
-        model.train()
-        epoch_loss = 0.0
-        for (x_batch,) in loader:
-            numeric_recon, logits = model(x_batch)
-            numeric_true, idx = split_targets(x_batch, model.numeric_dim, model.categorical_dims)
-            loss = reconstruction_error(numeric_recon, numeric_true, logits, idx).mean()
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            epoch_loss += loss.item() * len(x_batch)
-        print(f"epoch {epoch + 1}/{train_cfg['epochs']}: mean training loss {epoch_loss / len(x_train):.4f}", file=sys.stderr)
+    model = fit(x_train, categorical_dims, train_cfg)
 
     x_test = torch.from_numpy(encode(test_df, mean, std, categories))
     test_errors = score(model, x_test)
