@@ -1,10 +1,10 @@
 import json
 
 import numpy as np
+import pandas as pd
 import torch
 
 from config import REPO_ROOT, TRAINING_DIR, load_config
-from dataset import build_dataset, load_raw
 from encoding import encode
 from export_autoencoder_model import export, load_model
 from model import reconstruction_error, split_targets
@@ -15,6 +15,26 @@ def linear(x: np.ndarray, layer: dict, negative_slope: float) -> np.ndarray:
     if layer["activation"] == "leaky_relu":
         y = np.where(y >= 0, y, y * negative_slope)
     return y
+
+
+def encode_from_export(payload: dict, df: pd.DataFrame) -> np.ndarray:
+    columns = payload["numeric_features"]
+    numeric = df[columns].to_numpy(dtype=np.float64).copy()
+    for i, column in enumerate(columns):
+        kind = payload["numeric_transforms"][column]
+        if kind == "log1p":
+            numeric[:, i] = np.log1p(np.clip(numeric[:, i], 0, None))
+        elif kind == "sqrt":
+            numeric[:, i] = np.sqrt(np.clip(numeric[:, i], 0, None))
+    numeric = (numeric - np.asarray(payload["numeric_mean"])) / np.asarray(payload["numeric_std"])
+    parts = [numeric]
+    for feature in payload["categorical_features"]:
+        categories = feature["categories"]
+        codes = [categories.index(v) if v in categories else categories.index("other") for v in df[feature["name"]]]
+        onehot = np.zeros((len(df), len(categories)))
+        onehot[np.arange(len(df)), codes] = 1.0
+        parts.append(onehot)
+    return np.concatenate(parts, axis=1)
 
 
 def predict_from_export(payload: dict, x: np.ndarray) -> np.ndarray:
@@ -50,9 +70,8 @@ def main():
     checkpoint = torch.load(checkpoint_path, weights_only=False)
     model = load_model(checkpoint)
 
-    raw_dir = REPO_ROOT / config["dataset"]["raw_dir"]
-    dataset = build_dataset(load_raw(raw_dir, config["dataset"]["urls"])).reset_index(drop=True)
-    sample = dataset.sample(n=30, random_state=7)
+    records = pd.read_parquet(REPO_ROOT / config["mirage"]["records"])
+    sample = records.sample(n=200, random_state=7)
 
     mean = np.asarray(checkpoint["numeric_mean"], dtype=np.float32)
     std = np.asarray(checkpoint["numeric_std"], dtype=np.float32)
@@ -64,12 +83,16 @@ def main():
         numeric_true, idx = split_targets(x_t, model.numeric_dim, model.categorical_dims)
         real_errors = reconstruction_error(numeric_recon, numeric_true, logits, idx).numpy()
 
-    exported_errors = predict_from_export(payload, x.astype(np.float64))
+    x_from_json = encode_from_export(payload, sample)
+    encode_diff = float(np.max(np.abs(x_from_json - x)))
+    assert encode_diff < 1e-3, f"encoding rebuilt from the exported JSON alone differs from training by {encode_diff}"
+
+    exported_errors = predict_from_export(payload, x_from_json)
     max_diff = float(np.max(np.abs(real_errors - exported_errors)))
-    print(json.dumps({"max_diff": max_diff}))
+    print(json.dumps({"max_diff": max_diff, "encode_diff_from_json_only": encode_diff}))
 
     assert max_diff < 1e-3, f"exported forward pass diverges from the real model by {max_diff}"
-    print(f"OK — max reconstruction-error diff across 30 real sampled rows: {max_diff:.8f}")
+    print(f"OK — max reconstruction-error diff across 200 real sampled rows: {max_diff:.8f}")
 
 
 if __name__ == "__main__":

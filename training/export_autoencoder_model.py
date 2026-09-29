@@ -26,6 +26,13 @@ def load_model(checkpoint: dict) -> Autoencoder:
     return model
 
 
+def thresholds_from(checkpoint: dict) -> dict:
+    if "reconstruction_thresholds" in checkpoint:
+        return {proto: float(t) for proto, t in checkpoint["reconstruction_thresholds"].items()}
+    single = float(checkpoint["reconstruction_threshold"])
+    return {"tcp": single, "udp": single}
+
+
 def export(checkpoint_path, out_path):
     checkpoint = torch.load(checkpoint_path, weights_only=False)
     model = load_model(checkpoint)
@@ -39,7 +46,8 @@ def export(checkpoint_path, out_path):
             {"name": name, "categories": checkpoint["categories"][name]}
             for name in checkpoint["categorical_columns"]
         ],
-        "reconstruction_threshold": float(checkpoint["reconstruction_threshold"]),
+        "numeric_transforms": checkpoint["numeric_transforms"],
+        "reconstruction_thresholds": thresholds_from(checkpoint),
         "encoder": [
             {**linear_layer(model.encoder[0]), "activation": "leaky_relu"},
             {**linear_layer(model.encoder[2]), "activation": "linear"},

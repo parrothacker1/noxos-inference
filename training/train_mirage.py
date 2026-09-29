@@ -6,15 +6,21 @@ import pandas as pd
 import torch
 
 from config import REPO_ROOT, TRAINING_DIR, load_config
-from dataset import CATEGORICAL_COLUMNS, NUMERIC_COLUMNS, build_dataset, load_raw
-from encoding import encode, fit_categories, numeric_stats
+from dataset import CATEGORICAL_COLUMNS, NUMERIC_COLUMNS
+from encoding import encode, fit_categories, numeric_stats, transform_map
 from train_autoencoder import fit, score
 
+UT_CITATION = (
+    'Yuqiang Heng, Vikram Chandrasekhar, Jeffrey G. Andrews, "UTMobileNetTraffic2021: A Labeled Public Network Traffic Dataset", '
+    "IEEE Networking Letters 3(3), 2021 (curated copy on figshare, GPL 3.0+)."
+)
 CITATION = (
     "Giuseppe Aceto, Domenico Ciuonzo, Antonio Montieri, Valerio Persico and Antonio Pescapè, "
     '"MIRAGE: Mobile-app Traffic Capture and Ground-truth Creation", 4th IEEE International Conference on '
     "Computing, Communications and Security (ICCCS 2019). Dataset licence: CC BY-NC-ND 4.0."
 )
+MIN_CALIBRATION_ROWS = 200
+PROTOS = ("tcp", "udp")
 
 
 def split_by_app(df: pd.DataFrame, test_fraction: float, calibration_fraction: float, seed: int):
@@ -29,14 +35,18 @@ def split_by_app(df: pd.DataFrame, test_fraction: float, calibration_fraction: f
     return df[~is_test & ~is_calib], df[is_calib], df[is_test], sorted(calib_apps), sorted(test_apps)
 
 
-def flag_rates(errors: np.ndarray, protos: pd.Series, threshold: float) -> dict:
-    flagged = errors > threshold
-    out = {"all": {"rows": int(len(errors)), "flagged": float(flagged.mean())}}
-    for proto in ("tcp", "udp"):
+def per_protocol_thresholds(errors: np.ndarray, protos: pd.Series, percentile: float) -> dict[str, float]:
+    pooled = float(np.percentile(errors, percentile))
+    out = {}
+    for proto in PROTOS:
         mask = (protos == proto).to_numpy()
-        if mask.any():
-            out[proto] = {"rows": int(mask.sum()), "flagged": float(flagged[mask].mean())}
+        out[proto] = float(np.percentile(errors[mask], percentile)) if mask.sum() >= MIN_CALIBRATION_ROWS else pooled
     return out
+
+
+def flagged(errors: np.ndarray, protos: pd.Series, thresholds: dict[str, float]) -> np.ndarray:
+    limit = np.where((protos == "tcp").to_numpy(), thresholds["tcp"], thresholds["udp"])
+    return errors > limit
 
 
 def synthetic_anomalies(rng: np.random.Generator, n: int = 2000) -> dict[str, pd.DataFrame]:
@@ -54,22 +64,10 @@ def synthetic_anomalies(rng: np.random.Generator, n: int = 2000) -> dict[str, pd
     flood_packets = rng.integers(500, 5000, n).astype(float)
     upload_packets = rng.integers(5000, 50000, n).astype(float)
     return {
-        "syn_scan (tcp, random port, 1-2 packets, no reply)": frame("tcp", rng.integers(1, 65535, n), syn_packets * 60, syn_packets, zeros, zeros),
-        "udp_flood (udp, thousands of packets, no reply)": frame("udp", rng.integers(1, 65535, n), flood_packets * rng.uniform(512, 1400, n), flood_packets, zeros, zeros),
-        "big_upload (tcp 443, tens of thousands of packets up)": frame("tcp", np.full(n, 443), upload_packets * 1400, upload_packets, rng.uniform(1e3, 1e5, n), rng.uniform(10, 60, n)),
+        "syn_scan": frame("tcp", rng.integers(1, 65535, n), syn_packets * 60, syn_packets, zeros, zeros),
+        "udp_flood": frame("udp", rng.integers(1, 65535, n), flood_packets * rng.uniform(512, 1400, n), flood_packets, zeros, zeros),
+        "big_upload": frame("tcp", np.full(n, 443), upload_packets * 1400, upload_packets, rng.uniform(1e3, 1e5, n), rng.uniform(10, 60, n)),
     }
-
-
-def unsw_cross_check(config: dict, model, mean, std, categories, threshold: float) -> dict:
-    raw = load_raw(REPO_ROOT / config["dataset"]["raw_dir"], config["dataset"]["urls"])
-    unsw = build_dataset(raw)
-    unsw = unsw[unsw["proto"].isin(["tcp", "udp"])].reset_index(drop=True)
-    errors = score(model, torch.from_numpy(encode(unsw, mean, std, categories)))
-    out = {}
-    for label, name in ((0, "normal"), (1, "attack")):
-        mask = (unsw["label"] == label).to_numpy()
-        out[name] = flag_rates(errors[mask], unsw.loc[mask, "proto"], threshold)
-    return out
 
 
 def run_split(config: dict, records: pd.DataFrame, seed: int) -> dict:
@@ -78,7 +76,7 @@ def run_split(config: dict, records: pd.DataFrame, seed: int) -> dict:
     train_df, calib_df, test_df, calib_apps, test_apps = split_by_app(
         records, mirage["test_app_fraction"], mirage["calibration_app_fraction"], seed
     )
-    print(f"seed {seed}: train {len(train_df)} / calibration {len(calib_df)} / test {len(test_df)} snapshots; "
+    print(f"seed {seed}: train {len(train_df)} / calibration {len(calib_df)} / test {len(test_df)}; "
           f"test apps {test_apps}; calibration apps {calib_apps}", file=sys.stderr)
 
     categories = fit_categories(train_df, cfg["categorical_top_n"])
@@ -86,113 +84,142 @@ def run_split(config: dict, records: pd.DataFrame, seed: int) -> dict:
     mean, std = numeric_stats(train_df)
     model = fit(torch.from_numpy(encode(train_df, mean, std, categories)), categorical_dims, cfg)
 
-    calib_errors = score(model, torch.from_numpy(encode(calib_df, mean, std, categories)))
-    test_errors = score(model, torch.from_numpy(encode(test_df, mean, std, categories)))
-    table = {p: flag_rates(test_errors, test_df["proto"], float(np.percentile(calib_errors, p))) for p in [95, 97, 99, 99.5]}
+    def errors_of(df):
+        return score(model, torch.from_numpy(encode(df, mean, std, categories)))
+
+    calib_errors, test_errors = errors_of(calib_df), errors_of(test_df)
+    synthetic_errors = {name: errors_of(frame) for name, frame in synthetic_anomalies(np.random.default_rng(seed)).items()}
+    synthetic_protos = {name: frame["proto"] for name, frame in synthetic_anomalies(np.random.default_rng(seed)).items()}
+
+    results = {}
+    for p in mirage["threshold_percentiles"]:
+        thresholds = per_protocol_thresholds(calib_errors, calib_df["proto"], p)
+        test_flags = flagged(test_errors, test_df["proto"], thresholds)
+        rates = {"all": float(test_flags.mean())}
+        for proto in PROTOS:
+            mask = (test_df["proto"] == proto).to_numpy()
+            rates[proto] = float(test_flags[mask].mean()) if mask.any() else float("nan")
+        detection = {name: float(flagged(e, synthetic_protos[name], thresholds).mean()) for name, e in synthetic_errors.items()}
+        results[p] = {"thresholds": thresholds, "false_flag": rates, "detection": detection}
+
     return {
         "seed": seed, "model": model, "mean": mean, "std": std, "categories": categories,
-        "categorical_dims": categorical_dims, "calib_errors": calib_errors, "table": table,
-        "train_df": train_df, "calib_df": calib_df, "test_df": test_df,
+        "categorical_dims": categorical_dims, "results": results,
+        "calib_udp_rows": int((calib_df["proto"] == "udp").sum()),
+        "train_rows": len(train_df), "calib_rows": len(calib_df), "test_rows": len(test_df),
         "calib_apps": calib_apps, "test_apps": test_apps,
     }
+
+
+def spread(runs: list[dict], p: float, getter) -> str:
+    values = np.array([getter(r["results"][p]) for r in runs], dtype=float)
+    return f"{np.nanmean(values):.4f} ({np.nanmin(values):.4f}-{np.nanmax(values):.4f})"
 
 
 def main():
     config = load_config()
     cfg = config["training"]
     mirage = config["mirage"]
-    records = pd.read_parquet(REPO_ROOT / mirage["records"])
+    records = pd.read_parquet(REPO_ROOT / mirage["records"]).assign(source="mirage")
+    if config["utmobilenet"]["enabled"]:
+        ut = pd.read_parquet(REPO_ROOT / config["utmobilenet"]["records"]).assign(source="utmobilenet")
+        records = pd.concat([records, ut], ignore_index=True)
 
-    seeds = [cfg["random_state"] + i for i in range(mirage.get("app_split_repeats", 5))]
+    seeds = [cfg["random_state"] + i for i in range(mirage["app_split_repeats"])]
     runs = [run_split(config, records, seed) for seed in seeds]
     primary = runs[0]
-    model, mean, std, categories = primary["model"], primary["mean"], primary["std"], primary["categories"]
-    categorical_dims = primary["categorical_dims"]
-    train_df, calib_df, test_df = primary["train_df"], primary["calib_df"], primary["test_df"]
-    calib_apps, test_apps, table = primary["calib_apps"], primary["test_apps"], primary["table"]
-    calib_errors = primary["calib_errors"]
-
-    chosen = mirage["threshold_percentile"]
-    threshold = float(np.percentile(calib_errors, chosen))
-
-    rng = np.random.default_rng(cfg["random_state"])
-    synthetic = {}
-    for name, frame in synthetic_anomalies(rng).items():
-        errors = score(model, torch.from_numpy(encode(frame, mean, std, categories)))
-        synthetic[name] = float((errors > threshold).mean())
-
-    cross = unsw_cross_check(config, model, mean, std, categories, threshold)
+    chosen = {"tcp": mirage["threshold_percentile_tcp"], "udp": mirage["threshold_percentile_udp"]}
+    thresholds = {proto: primary["results"][chosen[proto]]["thresholds"][proto] for proto in PROTOS}
 
     checkpoint = {
-        "state_dict": model.state_dict(),
+        "state_dict": primary["model"].state_dict(),
         "numeric_dim": len(NUMERIC_COLUMNS),
-        "categorical_dims": categorical_dims,
+        "categorical_dims": primary["categorical_dims"],
         "hidden_dim": cfg["hidden_dim"],
         "bottleneck_dim": cfg["bottleneck_dim"],
         "numeric_columns": NUMERIC_COLUMNS,
+        "numeric_transforms": transform_map(),
         "categorical_columns": CATEGORICAL_COLUMNS,
-        "categories": categories,
-        "numeric_mean": mean,
-        "numeric_std": std,
-        "reconstruction_threshold": threshold,
+        "categories": primary["categories"],
+        "numeric_mean": primary["mean"],
+        "numeric_std": primary["std"],
+        "reconstruction_thresholds": thresholds,
+        "threshold_percentiles": chosen,
     }
     torch.save(checkpoint, TRAINING_DIR / config["paths"]["model_out"])
+    write_metrics(config, records, runs, chosen)
+    print(json.dumps({"chosen_percentiles": chosen, "thresholds": thresholds}, indent=2))
 
-    write_metrics(config, records, train_df, calib_df, test_df, test_apps, calib_apps, table, chosen, threshold, synthetic, cross, runs)
-    print(json.dumps({"threshold": threshold, "test_flag_rates": table[chosen], "synthetic_detection": synthetic, "unsw_cross_check": cross}, indent=2))
 
-
-def write_metrics(config, records, train_df, calib_df, test_df, test_apps, calib_apps, table, chosen, threshold, synthetic, cross, runs):
+def write_metrics(config, records, runs, chosen):
     cfg = config["training"]
-    rows = "\n".join(
-        f"| {p} | {r['all']['flagged']:.4f} | {r.get('tcp', {}).get('flagged', float('nan')):.4f} | {r.get('udp', {}).get('flagged', float('nan')):.4f} |"
-        for p, r in table.items()
+    mirage = config["mirage"]
+    primary = runs[0]
+    percentiles = mirage["threshold_percentiles"]
+    ff_rows = "\n".join(
+        f"| {p} | {spread(runs, p, lambda r: r['false_flag']['all'])} | {spread(runs, p, lambda r: r['false_flag']['tcp'])} | {spread(runs, p, lambda r: r['false_flag']['udp'])} |"
+        for p in percentiles
     )
-    syn = "\n".join(f"- {name}: {rate:.4f} flagged" for name, rate in synthetic.items())
-    unsw = "\n".join(
-        f"- UNSW-NB15 {name} rows: " + ", ".join(f"{k} {v['flagged']:.4f} of {v['rows']}" for k, v in r.items())
-        for name, r in cross.items()
+    det_rows = "\n".join(
+        f"| {p} | {spread(runs, p, lambda r: r['detection']['syn_scan'])} | {spread(runs, p, lambda r: r['detection']['udp_flood'])} | {spread(runs, p, lambda r: r['detection']['big_upload'])} |"
+        for p in percentiles
     )
-    proto_counts = records["proto"].value_counts().to_dict()
-    spread = "\n".join(
-        f"| {r['seed']} | {', '.join(r['test_apps'])} | {r['table'][chosen]['all']['flagged']:.4f} | "
-        f"{r['table'][chosen].get('tcp', {}).get('flagged', float('nan')):.4f} | {r['table'][chosen].get('udp', {}).get('flagged', float('nan')):.4f} |"
+    split_rows = "\n".join(
+        f"| {r['seed']} | {', '.join(r['test_apps'])} | {r['calib_udp_rows']} | {r['results'][chosen['tcp']]['false_flag']['tcp']:.4f} | {r['results'][chosen['udp']]['false_flag']['udp']:.4f} |"
         for r in runs
     )
-    overall = [r["table"][chosen]["all"]["flagged"] for r in runs]
+    shipped_tcp = spread(runs, chosen["tcp"], lambda r: r["false_flag"]["tcp"])
+    shipped_udp = spread(runs, chosen["udp"], lambda r: r["false_flag"]["udp"])
+    shipped_syn = spread(runs, chosen["tcp"], lambda r: r["detection"]["syn_scan"])
+    shipped_upload = spread(runs, chosen["tcp"], lambda r: r["detection"]["big_upload"])
+    shipped_flood = spread(runs, chosen["udp"], lambda r: r["detection"]["udp_flood"])
+    ut_count = int((records["source"] == "utmobilenet").sum())
+    ut_line = (
+        f"- Source 2: UTMobileNetTraffic2021, {ut_count} snapshots from emulated Android app interactions, 85% of its flows UDP and mostly DNS. "
+        f"{UT_CITATION} Apps present in both datasets are treated as one app for splitting.\n"
+        if ut_count else ""
+    )
+    transforms = ", ".join(f"{c}: {t}" for c, t in transform_map().items())
+    thr = {proto: primary["results"][chosen[proto]]["thresholds"][proto] for proto in PROTOS}
     text = (
         "# Autoencoder trained on MIRAGE-2019 (real Android app traffic, normal only)\n\n"
-        "Normal-traffic anomaly detector: no attack label is used. One shared encoder/bottleneck, MSE head over the "
-        f"{len(NUMERIC_COLUMNS)} log-transformed, z-scored numeric features and a softmax head for `proto`; per-row error = mean "
-        f"numeric squared error + cross-entropy. Architecture input -> {cfg['hidden_dim']} -> {cfg['bottleneck_dim']} -> "
-        f"{cfg['hidden_dim']} -> outputs, LeakyReLU, {cfg['epochs']} epochs, Adam lr {cfg['learning_rate']}.\n\n"
+        "Normal-traffic anomaly detector, no attack label used. Shared encoder/bottleneck, MSE head over the "
+        f"{len(NUMERIC_COLUMNS)} transformed, z-scored numeric features and a softmax head for `proto`; per-row error = mean numeric "
+        f"squared error + cross-entropy. Input -> {cfg['hidden_dim']} -> {cfg['bottleneck_dim']} -> {cfg['hidden_dim']} -> outputs, "
+        f"LeakyReLU, {cfg['epochs']} epochs, Adam lr {cfg['learning_rate']}.\n\n"
         "## Data and features\n\n"
-        f"- Source: MIRAGE-2019, the downloadable release: {records['app'].nunique()} Android apps on {records['device'].nunique()} devices (the paper describes 40 apps; this public release is a subset). {CITATION}\n"
+        f"- Source 1: MIRAGE-2019, the downloadable release: {records[records['source'] == 'mirage']['app'].nunique()} Android apps on 2 devices "
+        f"(the paper describes 40 apps; this public release is a subset). {CITATION}\n"
+        f"{ut_line}"
         "- **The licence is non-commercial and no-derivatives. A commercial product must retrain on Warden's own logged traffic.**\n"
-        f"- {len(records)} destination snapshots ({proto_counts}), from {records['capture'].nunique()} captures and {records['app'].nunique()} apps.\n"
+        f"- {len(records)} destination snapshots ({records['proto'].value_counts().to_dict()}) from {records['capture'].nunique()} captures.\n"
         "- One record per destination IP per capture, at a random snapshot time in 0-30 s, aggregating that destination's flows. "
-        "Per-packet detail exists only for each flow's first 32 packets; beyond that, counts are interpolated linearly from flow totals.\n"
-        "- Flows have no absolute start time, so a destination's flows are assumed to start together (this overcounts if they start later).\n"
-        "- Upstream IP bytes are estimated as payload plus the flow's average header overhead (per-packet IP length is not stored).\n"
-        "- No TCP flags in the data, so **`state` is not a feature** here. `dttl` is not a feature (not capturable on Android).\n"
-        "- Mostly HTTPS over TCP; UDP is thin. Captures are single-app sessions, so 'normal' means these 40 apps.\n\n"
-        "## Split (by app, so the test measures unseen apps)\n\n"
-        f"- Train {len(train_df)}, calibration {len(calib_df)} ({', '.join(calib_apps)}), test {len(test_df)} ({', '.join(test_apps)}).\n"
-        f"- Threshold: {chosen}th percentile of calibration-app reconstruction error = {threshold:.5f}.\n\n"
-        "## False-flag rate on held-out normal traffic (unseen apps)\n\n"
-        "| calibration percentile | all | TCP | UDP |\n|---|---|---|---|\n" + rows + "\n\n"
-        "If the model generalises across apps, the rate should be close to 1 minus the percentile. A larger number means unseen apps look unusual.\n\n"
-        f"### Spread across {len(runs)} different app splits (each retrains from scratch; the shipped model is the first)\n\n"
-        f"At the {chosen}th percentile the false-flag rate on unseen apps ranged from {min(overall):.4f} to {max(overall):.4f} (mean {np.mean(overall):.4f}); with only {records['app'].nunique()} apps, which apps are held out matters a lot.\n\n"
-        "| seed | held-out apps | all | TCP | UDP |\n|---|---|---|---|---|\n" + spread + "\n\n"
-        "## Sanity checks, NOT validation\n\n"
-        "Synthetic anomaly shapes I defined in feature space (they show the model is not blind to extreme shapes, nothing more):\n\n" + syn + "\n\n"
-        "UNSW-NB15 rows scored with this model at the same threshold (different network, whole-flow records, so units differ; treat as a rough shift indicator only):\n\n" + unsw + "\n\n"
-        "## Limits\n\n"
-        "- There is no attack traffic in MIRAGE, so detection ability in this domain is unmeasured.\n"
-        "- Trained on 3 devices and 40 apps; another phone, OS version or app mix may shift the distribution.\n"
-        "- The threshold changes on every retrain; read `reconstruction_threshold` from the model file.\n"
-        "- Superseded once a model trained on Warden-captured traffic exists.\n"
+        "Per-packet detail exists only for each flow's first 32 packets; later counts are interpolated linearly from flow totals. "
+        "Flows have no absolute start time, so a destination's flows are assumed to start together. Upstream IP bytes are payload plus the "
+        "flow's average header overhead.\n"
+        "- No TCP flags in the data, so `state` is not a feature; `dttl` is not a feature. Mostly HTTPS over TCP; UDP is thin.\n"
+        f"- Input transforms (also written into the export as `numeric_transforms`): {transforms}.\n\n"
+        f"## Thresholds: one per protocol, from calibration apps of that protocol\n\n"
+        f"Shipped thresholds: TCP = {chosen['tcp']}th percentile of TCP calibration error = {thr['tcp']:.5f}; "
+        f"UDP = {chosen['udp']}th percentile of UDP calibration error = {thr['udp']:.5f} "
+        f"(a protocol with fewer than {MIN_CALIBRATION_ROWS} calibration rows falls back to the pooled percentile). "
+        "UDP uses a looser percentile because its calibration data is thin and UDP false flags are high.\n\n"
+        "**Shipped configuration, mean (min-max) over the app splits**\n\n"
+        f"- False-flag rate on unseen-app normal traffic: TCP {shipped_tcp}, UDP {shipped_udp}\n"
+        f"- Synthetic shapes detected (sanity only): SYN scan {shipped_syn}, UDP flood {shipped_flood}, big upload {shipped_upload}\n\n"
+        f"## Held-out normal traffic (apps never seen in training), mean (min-max) over {len(runs)} different app splits\n\n"
+        "False-flag rate; ideal is about 1 minus the percentile.\n\n"
+        "| calibration percentile | all | TCP | UDP |\n|---|---|---|---|\n" + ff_rows + "\n\n"
+        "Per split at the shipped percentiles (calibration UDP rows shows how thin the UDP calibration is):\n\n"
+        "| seed | held-out apps | calibration UDP rows | TCP flagged | UDP flagged |\n|---|---|---|---|---|\n" + split_rows + "\n\n"
+        "## Synthetic anomaly shapes, sanity only, NOT validation\n\n"
+        "Shapes I defined in feature space, detected fraction (mean (min-max) over splits):\n\n"
+        "| calibration percentile | SYN scan (tcp) | UDP flood (udp) | big upload (tcp) |\n|---|---|---|---|\n" + det_rows + "\n\n"
+        "## What this does NOT show\n\n"
+        "- **F1 is not measurable**: MIRAGE has no attack traffic. Detection ability awaits Warden-logged normal traffic plus deliberately generated test traffic.\n"
+        "- The UNSW-NB15 proxy was dropped: it measured the gap between networks, not attacks.\n"
+        f"- {records['app'].nunique()} apps in total; another phone, OS version or app mix may shift the distribution.\n"
+        "- Thresholds change on every retrain; always read them from the model file. Superseded once a model trained on Warden-captured traffic exists.\n"
     )
     (TRAINING_DIR / config["paths"]["metrics_out"]).write_text(text)
 

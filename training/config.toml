@@ -14,12 +14,23 @@ dir = "data/raw/mirage/MIRAGE-2019_traffic_dataset_downloadable"
 records = "data/raw/mirage_records.parquet"
 test_app_fraction = 0.2
 calibration_app_fraction = 0.1
-threshold_percentile = 99
+threshold_percentile_tcp = 97
+threshold_percentile_udp = 99
+threshold_percentiles = [95, 97, 99]
+app_split_repeats = 5
+
+[utmobilenet]
+enabled = false
+archive_url = "https://ndownloader.figshare.com/files/42438624"
+archive_sha256 = "c7452c19e1516d025a99c2fa41cdf70c6cd19c0aef80037f55cc867375e194d3"
+parquet = "data/raw/utmobilenet21.parquet"
+records = "data/raw/utmobilenet_records.parquet"
 
 [features]
 numeric = ["dst_port", "src_byte_count", "src_packet_count", "dst_byte_count", "duration_millis", "handshake_latency_millis", "smean"]
 log = ["dst_port", "src_byte_count", "src_packet_count", "dst_byte_count", "duration_millis", "handshake_latency_millis", "smean"]
 categorical = ["proto"]
+transform = "sqrt"
 
 [training]
 n_splits = 5

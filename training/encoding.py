@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from dataset import CATEGORICAL_COLUMNS, LOG_COLUMNS, NUMERIC_COLUMNS
+from dataset import CATEGORICAL_COLUMNS, LOG_COLUMNS, NUMERIC_COLUMNS, TRANSFORM
 
 
 def top_categories(values: pd.Series, top_n: int) -> list[str]:
@@ -25,10 +25,24 @@ def onehot(values: pd.Series, categories: list[str]) -> np.ndarray:
     return out
 
 
+def column_transform(col: str) -> str:
+    if col not in LOG_COLUMNS:
+        return "none"
+    return "log1p" if col == "dst_port" else TRANSFORM
+
+
+def transform_map() -> dict[str, str]:
+    return {col: column_transform(col) for col in NUMERIC_COLUMNS}
+
+
 def log_transform_numeric(df: pd.DataFrame) -> pd.DataFrame:
     numeric = df[NUMERIC_COLUMNS].copy()
-    for col in LOG_COLUMNS:
-        numeric[col] = np.log1p(numeric[col].clip(lower=0))
+    for col in NUMERIC_COLUMNS:
+        kind = column_transform(col)
+        if kind == "log1p":
+            numeric[col] = np.log1p(numeric[col].clip(lower=0))
+        elif kind == "sqrt":
+            numeric[col] = np.sqrt(numeric[col].clip(lower=0))
     return numeric
 
 

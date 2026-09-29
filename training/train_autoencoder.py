@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from config import REPO_ROOT, TRAINING_DIR, load_config
 from dataset import CATEGORICAL_COLUMNS, FEATURE_COLUMNS, NUMERIC_COLUMNS, build_dataset, load_raw
-from encoding import encode, fit_categories, numeric_stats
+from encoding import encode, fit_categories, numeric_stats, transform_map
 from model import Autoencoder, reconstruction_error, split_targets
 
 
@@ -146,6 +146,7 @@ def main():
             "hidden_dim": train_cfg["hidden_dim"],
             "bottleneck_dim": train_cfg["bottleneck_dim"],
             "numeric_columns": NUMERIC_COLUMNS,
+            "numeric_transforms": transform_map(),
             "categorical_columns": CATEGORICAL_COLUMNS,
             "categories": categories,
             "numeric_mean": mean,

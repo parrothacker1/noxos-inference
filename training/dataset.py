@@ -11,6 +11,7 @@ NUMERIC_COLUMNS = _features["numeric"]
 CATEGORICAL_COLUMNS = _features["categorical"]
 FEATURE_COLUMNS = NUMERIC_COLUMNS + CATEGORICAL_COLUMNS
 LOG_COLUMNS = _features.get("log", ["dst_port"])
+TRANSFORM = _features.get("transform", "log1p")
 
 CANDIDATE_COLUMNS = {
     "src_bits_per_sec": "Sload",
