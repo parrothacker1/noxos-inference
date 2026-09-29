@@ -27,6 +27,7 @@ Restart=always
 RestartSec=5
 Environment=PORT=8443
 Environment=NOXOS_MANIFEST_URL=https://github.com/parrothacker1/noxos-inference/releases/download/teacher-latest/manifest.json
+Environment=NOXOS_FILE_MANIFEST_URL=https://github.com/parrothacker1/noxos-inference/releases/download/file-latest/manifest.json
 Environment=NOXOS_RELOAD_INTERVAL_SECONDS=300
 Environment=NOXOS_INFERENCE_API_KEY=CHANGE_ME_BEFORE_LAUNCH
 

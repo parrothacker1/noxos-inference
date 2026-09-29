@@ -2,7 +2,7 @@
 
 Single small EC2 instance, `us-east-1`, account `139229021586` (same account/region every other box in this project uses). No fleet, no spot, no EBS snapshot dance — same reasoning as the original pre-reset inference box: this serves a small model over a stateless Go binary, cost-gated to one call per newly-flagged destination, not a high-QPS service. `t3.micro` on-demand (~$7.50/mo).
 
-**Only `/analyze/network` is real and deployable right now.** `/analyze/file` has no server code — `ML-FILE-DESIGN.md` is a design doc, not implemented — so this box runs `teacher-server` alone, not a "both mode" service the way the pre-reset `service/app.py` did. Revisit this README once the file-side classifier from `ML-FILE-DESIGN.md` actually exists.
+**`/analyze/network` and `/analyze/file` are both served by this one binary.** The file endpoint is a second dynamically loaded model (`NOXOS_FILE_MANIFEST_URL`, release `file-latest`) and is **advisory only**: a Drebin-2012 permission model, unvalidated on modern APKs, that must not gate quarantine or any verdict. `/health` reports both models.
 
 ## IAM: deliberately none
 
