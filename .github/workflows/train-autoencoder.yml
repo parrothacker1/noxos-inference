@@ -19,26 +19,10 @@ jobs:
       - working-directory: training
         run: uv sync
 
-      - name: Fetch dataset
-        working-directory: training
+      - name: Manual release only
         run: |
-          mkdir -p ../data/raw
-          uv run python -c "import tomllib; print('\n'.join(tomllib.load(open('config.toml','rb'))['dataset']['urls']))" > /tmp/dataset_urls.txt
-          while IFS= read -r URL; do
-            curl -sL "$URL" -o "../data/raw/$(basename "$URL")"
-          done < /tmp/dataset_urls.txt
-
-      - name: Train autoencoder
-        working-directory: training
-        run: uv run train_autoencoder.py
-
-      - name: Export on-device model
-        working-directory: training
-        run: uv run export_autoencoder_model.py
-
-      - name: Verify export matches the trained model
-        working-directory: training
-        run: uv run test_export.py
+          echo "The autoencoder is trained on MIRAGE-2019 (a 1.4 GB archive that expands to 4.8 GB) and published by hand. This workflow no longer trains it; see knowledge-graph/noxos-inference/ML-AUTOENCODER-CONTRACT.md."
+          exit 1
 
       - name: Build release assets
         id: assets
