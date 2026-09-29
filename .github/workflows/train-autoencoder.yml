@@ -57,8 +57,8 @@ jobs:
         run: |
           gh release delete autoencoder-latest --yes --cleanup-tag || true
           gh release create autoencoder-latest model.json manifest.json model.json.sha256 METRICS.md \
-            --title "On-device autoencoder model (latest)" \
-            --notes "Automated training run, version ${{ steps.assets.outputs.version }}."
+            --title "On-device autoencoder model (latest) - INTERIM, UNSW-NB15 only" \
+            --notes "INTERIM. Trained and validated only on UNSW-NB15, never on real phone traffic; feature units differ from what Warden measures on-device; overall F1 is dominated by UDP (see per-protocol table in METRICS.md); threshold changes every retrain, read it from model.json. Automated run, version ${{ steps.assets.outputs.version }}."
         env:
           GH_TOKEN: ${{ github.token }}
 
@@ -66,7 +66,7 @@ jobs:
         working-directory: training
         run: |
           gh release create "autoencoder-${{ steps.assets.outputs.version }}" model.json manifest.json model.json.sha256 METRICS.md \
-            --title "On-device autoencoder model v${{ steps.assets.outputs.version }}" \
-            --notes "Automated training run."
+            --title "On-device autoencoder model v${{ steps.assets.outputs.version }} - INTERIM" \
+            --notes "INTERIM, UNSW-NB15 only. See METRICS.md."
         env:
           GH_TOKEN: ${{ github.token }}
