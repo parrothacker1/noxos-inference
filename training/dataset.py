@@ -14,8 +14,9 @@ NUMERIC_COLUMNS = [
     "handshake_latency_millis",
     "smean",
     "dmean",
+    "dttl",
 ]
-CATEGORICAL_COLUMNS = ["proto"]
+CATEGORICAL_COLUMNS = ["proto", "state"]
 FEATURE_COLUMNS = NUMERIC_COLUMNS + CATEGORICAL_COLUMNS
 
 
@@ -48,6 +49,8 @@ def build_dataset(df: pd.DataFrame) -> pd.DataFrame:
     x = pd.DataFrame(index=df.index)
     x["label"] = df["label"].astype(int)
     x["proto"] = df["proto"].astype(str)
+    x["state"] = df["state"].astype(str)
+    x["dttl"] = df["dttl"].astype(float)
     x["dst_port"] = df["dsport"].map(parse_port)
     x["src_byte_count"] = df["sbytes"].astype(float)
     x["src_packet_count"] = df["Spkts"].astype(float)

@@ -14,32 +14,45 @@ def linear_layer(layer: torch.nn.Linear) -> dict:
     }
 
 
-def export(checkpoint_path, out_path):
-    checkpoint = torch.load(checkpoint_path, weights_only=False)
+def load_model(checkpoint: dict) -> Autoencoder:
     model = Autoencoder(
         numeric_dim=checkpoint["numeric_dim"],
-        proto_dim=checkpoint["proto_dim"],
+        categorical_dims=checkpoint["categorical_dims"],
         hidden_dim=checkpoint["hidden_dim"],
         bottleneck_dim=checkpoint["bottleneck_dim"],
     )
     model.load_state_dict(checkpoint["state_dict"])
     model.eval()
+    return model
+
+
+def export(checkpoint_path, out_path):
+    checkpoint = torch.load(checkpoint_path, weights_only=False)
+    model = load_model(checkpoint)
 
     payload = {
         "numeric_features": checkpoint["numeric_columns"],
-        "proto_categories": checkpoint["proto_categories"],
         "numeric_mean": np.asarray(checkpoint["numeric_mean"], dtype=np.float64).tolist(),
         "numeric_std": np.asarray(checkpoint["numeric_std"], dtype=np.float64).tolist(),
+        "numeric_reduction": "mean",
+        "categorical_features": [
+            {"name": name, "categories": checkpoint["categories"][name]}
+            for name in checkpoint["categorical_columns"]
+        ],
         "reconstruction_threshold": float(checkpoint["reconstruction_threshold"]),
         "encoder": [
-            {**linear_layer(model.encoder[0]), "activation": "relu"},
+            {**linear_layer(model.encoder[0]), "activation": "leaky_relu"},
             {**linear_layer(model.encoder[2]), "activation": "linear"},
         ],
         "decoder_trunk": [
-            {**linear_layer(model.decoder_trunk[0]), "activation": "relu"},
+            {**linear_layer(model.decoder_trunk[0]), "activation": "leaky_relu"},
         ],
         "decoder_numeric_head": {**linear_layer(model.decoder_numeric), "activation": "linear"},
-        "decoder_proto_head": {**linear_layer(model.decoder_proto), "activation": "linear"},
+        "decoder_categorical_heads": [
+            {"name": name, **linear_layer(head), "activation": "linear"}
+            for name, head in zip(checkpoint["categorical_columns"], model.decoder_categorical)
+        ],
+        "leaky_relu_negative_slope": 0.01,
     }
 
     out_path.write_text(json.dumps(payload))

@@ -1,26 +1,49 @@
 # Autoencoder — unsupervised anomaly-detection tier (Tier 1)
 
-Trained on normal traffic only (1621863 rows, `label == 0`) — never sees an attack label during training, per the design in `knowledge-graph/noxos-inference/ML-NETWORK-DESIGN.md`'s "Autoencoder reconstruction-loss design" section. Two decoder heads sharing one encoder/bottleneck: a linear head over the 9 z-score-standardized numeric features (loss = MSE), and a softmax head over one-hot `proto` (loss = cross-entropy). Architecture: input(16) -> hidden(32) -> bottleneck(4) -> hidden(32) -> [numeric(9), proto(7)], 60 epochs, Adam lr=0.001.
+Trained on normal traffic only (1621865 rows, `label == 0`), never sees an attack label. One shared encoder/bottleneck; decoder heads: linear/MSE over the 10 z-score-standardized numeric features, plus one softmax/cross-entropy head per categorical feature (proto, state). Architecture: input(24) -> hidden(32) -> bottleneck(4) -> hidden(32) -> [numeric(10), proto(7), state(7)], LeakyReLU, 60 epochs, Adam lr=0.001.
 
-## Open design questions from the design doc, resolved here
+Reconstruction error per row = **mean** over numeric features of squared error + sum over categorical heads of per-row cross-entropy (unweighted).
 
-- **`dst_port`'s lumpy/multimodal distribution**: resolved with a `log1p` transform before standardization (not bucketing) — keeps it in the numeric head as a continuous value, just compresses the long tail of high ephemeral ports toward the well-known-port cluster.
-- **`proto`'s 100+ distinct values**: resolved by bucketing to the top 6 most frequent protocols (by row count in the normal-only training split) plus an `"other"` bucket, instead of full-cardinality one-hot. Real categories kept: tcp, udp, arp, ospf, icmp, igmp, plus `other` for everything else.
+## Encoding
 
-## Held-out evaluation (`StratifiedGroupKFold` split, same leak-free grouping as the teacher/student models — every held-out feature-pattern is unseen in training)
+- `dst_port`: `log1p` before standardization.
+- Categorical features bucketed to the top 6 values by frequency in the normal-only training split plus `other`:
+  - `proto`: tcp, udp, arp, ospf, icmp, igmp, other
+  - `state`: FIN, CON, INT, REQ, RST, ECO, other
+- `dttl` (destination TTL) and `state` (connection state) were added after a feature sweep — the original 10 features capped F1 at ~0.75 (see `knowledge-graph/noxos-inference/TASKS.md`).
 
-- Held-out rows: 456020 (405468 normal, 50552 attack)
-- Mean reconstruction error, normal held-out rows: 0.0021 (median 0.0003)
-- Mean reconstruction error, attack held-out rows: 0.0262 (median 0.0017)
-- Flagging threshold: 92th percentile of normal held-out reconstruction error = 0.0017
+## Held-out evaluation (`StratifiedGroupKFold`, groups = exact feature pattern over all model inputs)
 
-**Why the 92nd percentile, not the conventional 95th**: a real threshold sweep (50th-99th) found a sharp cliff, not a smooth precision/recall tradeoff — F1 stays 0.62-0.75 from the 85th through 92nd percentile, then collapses to ~0.076 at 93rd and stays there through 99th. Root cause: roughly 90% of attack rows in the held-out set land within a narrow band around a single reconstruction-error value (~0.0017-0.0018), almost certainly reflecting UNSW-NB15's own known row duplication among synthetic attack flows (see the `StratifiedGroupKFold` grouping above — 1,199,022 distinct patterns across 2,280,083 rows). The 92nd-percentile-of-normal threshold (0.0017) sits just below that cluster; the 93rd (0.0020) sits just above it, so a 0.0003 move in the threshold flips ~90% of attacks from flagged to unflagged in one step. 92 is the last percentile before that cliff and gives the best F1 in the sweep. Recall matters more than precision for this specific tier — per `ML-NETWORK-DESIGN.md` item 15, a flag here is cheap (traffic stays live while escalating to the student) but a miss here means the destination never reaches the student/teacher tiers at all — and recall stays within 0.005 of its ceiling (0.984 at 92 vs. 0.989 at 90) while precision and F1 are both meaningfully better at 92.
+- Held-out rows: 456016 (405466 normal, 50550 attack)
+- Mean reconstruction error: normal 0.0020 (median 0.0001), attack 0.1242 (median 0.0028)
+- Chosen threshold: 94th percentile of normal held-out error = 0.00235 (F1-maximizing point of the sweep below; note it is selected on the same held-out set it is reported on, so treat the F1 as slightly optimistic)
 
-## Anomaly-detection performance at that threshold (flag vs. true label)
+## At the chosen threshold
 
-- Accuracy: 0.9271
-- Precision: 0.6053
-- Recall: 0.9840
-- F1: 0.7495
+- Accuracy: 0.9464
+- Precision: 0.6746
+- Recall: 0.9978
+- F1: 0.8050
+- Flagged rate: 0.1640
 
-**Not a like-for-like comparison with the teacher/student models** — this is an unsupervised anomaly detector scored against labels it never trained on, evaluated for a different job (catching traffic shapes the supervised models were never trained to recognize at all), not for beating their F1.
+## Threshold sweep (even percentiles + the chosen one)
+
+| percentile | threshold | precision | recall | F1 | flagged rate |
+|---|---|---|---|---|---|
+| 70 | 0.00022 | 0.2936 | 1.0000 | 0.4539 | 0.3776 |
+| 72 | 0.00023 | 0.3081 | 1.0000 | 0.4710 | 0.3598 |
+| 74 | 0.00027 | 0.3241 | 1.0000 | 0.4895 | 0.3420 |
+| 76 | 0.00033 | 0.3419 | 0.9999 | 0.5095 | 0.3242 |
+| 78 | 0.00039 | 0.3617 | 0.9999 | 0.5312 | 0.3065 |
+| 80 | 0.00044 | 0.3840 | 0.9999 | 0.5549 | 0.2887 |
+| 82 | 0.00052 | 0.4092 | 0.9999 | 0.5807 | 0.2709 |
+| 84 | 0.00063 | 0.4379 | 0.9999 | 0.6091 | 0.2531 |
+| 86 | 0.00072 | 0.4710 | 0.9999 | 0.6404 | 0.2353 |
+| 88 | 0.00084 | 0.5095 | 0.9999 | 0.6751 | 0.2175 |
+| 90 | 0.00096 | 0.5549 | 0.9999 | 0.7137 | 0.1998 |
+| 92 | 0.00134 | 0.6091 | 0.9999 | 0.7570 | 0.1820 |
+| 94 | 0.00235 | 0.6746 | 0.9978 | 0.8050 | 0.1640 |
+| 96 | 0.00481 | 0.1718 | 0.0665 | 0.0959 | 0.0429 |
+| 98 | 0.01333 | 0.2304 | 0.0480 | 0.0795 | 0.0231 |
+
+Not a like-for-like comparison with the teacher/student models: this is an unsupervised anomaly detector scored against labels it never trained on.

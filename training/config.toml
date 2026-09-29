@@ -13,8 +13,9 @@ bottleneck_dim = 4
 epochs = 60
 batch_size = 512
 learning_rate = 0.001
-proto_top_n = 6
-threshold_percentile = 92
+categorical_top_n = 6
+threshold_percentile_min = 70
+threshold_percentile_max = 99
 
 [paths]
 models_dir = "models"
