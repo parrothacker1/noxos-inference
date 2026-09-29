@@ -33,6 +33,7 @@ def main():
     normal_df = dataset[dataset["label"] == 0]
     numeric_columns = [c for c in feature_columns if c not in CATEGORICAL_COLUMNS]
     numeric_defaults = {c: float(normal_df[c].median()) for c in numeric_columns}
+    numeric_scale = {c: float(normal_df[c].std()) or 1.0 for c in numeric_columns}
     categorical_defaults = {c: normal_df[c].astype(str).mode().iloc[0] for c in CATEGORICAL_COLUMNS}
 
     models_dir = TRAINING_DIR / "models"
@@ -44,6 +45,7 @@ def main():
             "categorical_columns": CATEGORICAL_COLUMNS,
             "categories": categories,
             "numeric_defaults": numeric_defaults,
+            "numeric_scale": numeric_scale,
             "categorical_defaults": categorical_defaults,
         },
         models_dir / "teacher_production.joblib",
