@@ -4,6 +4,12 @@ urls = [
     "https://huggingface.co/datasets/Mouwiya/UNSW-NB15/resolve/main/data/train-00001-of-00002.parquet",
 ]
 raw_dir = "data/raw"
+protos = ["tcp", "udp"]
+
+[features]
+numeric = ["dst_port", "src_byte_count", "src_packet_count", "dst_byte_count", "duration_millis", "handshake_latency_millis", "smean"]
+log = ["dst_port", "src_byte_count", "src_packet_count", "dst_byte_count", "duration_millis", "handshake_latency_millis", "smean"]
+categorical = ["proto", "state"]
 
 [training]
 n_splits = 5

@@ -18,7 +18,8 @@ def group_split(df, n_splits: int, random_state: int):
     print(f"{groups.nunique()} distinct feature patterns across {len(df)} rows", file=sys.stderr)
 
     splitter = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
-    train_idx, test_idx = next(splitter.split(df, df["label"], groups=groups))
+    strata = df["label"] * 2 + (df["proto"] == "tcp").astype(int)
+    train_idx, test_idx = next(splitter.split(df, strata, groups=groups))
 
     train_groups = set(groups.iloc[train_idx])
     test_groups = set(groups.iloc[test_idx])
@@ -62,7 +63,11 @@ def main():
     models_dir.mkdir(parents=True, exist_ok=True)
 
     raw_df = load_raw(raw_dir, config["dataset"]["urls"])
-    dataset = build_dataset(raw_df).reset_index(drop=True)
+    dataset = build_dataset(raw_df)
+    protos = config["dataset"].get("protos")
+    if protos:
+        dataset = dataset[dataset["proto"].isin(protos)]
+    dataset = dataset.reset_index(drop=True)
 
     train_df, test_df = group_split(dataset, train_cfg["n_splits"], train_cfg["random_state"])
     normal_train_df = train_df[train_df["label"] == 0].reset_index(drop=True)
@@ -111,6 +116,23 @@ def main():
     normal_test_errors = test_errors[y_test == 0]
     attack_test_errors = test_errors[y_test == 1]
 
+    flagged_at_best = test_errors > best["threshold"]
+    per_proto = {}
+    for proto in ["tcp", "udp"]:
+        mask = (test_df["proto"] == proto).to_numpy()
+        if mask.sum() == 0:
+            continue
+        y_p = y_test[mask]
+        f_p = flagged_at_best[mask].astype(int)
+        per_proto[proto] = {
+            "rows": int(mask.sum()),
+            "attack_rate": float(y_p.mean()),
+            "precision": float(precision_score(y_p, f_p, zero_division=0)),
+            "recall": float(recall_score(y_p, f_p, zero_division=0)),
+            "f1": float(f1_score(y_p, f_p, zero_division=0)),
+            "flagged_normal_rate": float(f_p[y_p == 0].mean()),
+        }
+
     torch.save(
         {
             "state_dict": model.state_dict(),
@@ -147,6 +169,16 @@ def main():
         f"LeakyReLU, {train_cfg['epochs']} epochs, Adam lr={train_cfg['learning_rate']}.\n\n"
         "Reconstruction error per row = **mean** over numeric features of squared error + sum over categorical heads of "
         "per-row cross-entropy (unweighted).\n\n"
+        "## INTERIM MODEL — read before relying on it\n\n"
+        "- Trained and validated **only on UNSW-NB15** (a 2015 lab dataset). It has never been evaluated on real phone traffic.\n"
+        "- **Unit mismatch**: UNSW rows are complete per-flow records at the IP layer. Warden scores per destination IP, early "
+        "(duration up to ~30 s), counts outbound bytes with headers and inbound bytes as payload only, and counts inbound "
+        "read() chunks, not packets. The same feature names do not mean the same thing on-device.\n"
+        "- **The overall F1 is dominated by UDP**; see the per-protocol table. TCP is most phone traffic and is much weaker.\n"
+        "- Only TCP and UDP are relayed on-device; this model was trained on TCP/UDP rows only.\n"
+        "- `dttl` was removed: in UNSW-NB15 it is a generator artifact (normal TTL 29 vs attack TTL 252) and cannot be read for TCP on Android.\n"
+        "- The threshold changes on every retrain; always read `reconstruction_threshold` from the downloaded model.\n"
+        "- Superseded once a model trained on Warden-captured normal traffic exists.\n\n"
         "## Encoding\n\n"
         "- `dst_port`: `log1p` before standardization.\n"
         "- Categorical features bucketed to the top "
@@ -167,6 +199,13 @@ def main():
         f"- Recall: {best['recall']:.4f}\n"
         f"- F1: {best['f1']:.4f}\n"
         f"- Flagged rate: {best['flagged_rate']:.4f}\n\n"
+        "## Per-protocol breakdown at the chosen threshold (overall F1 hides this)\n\n"
+        "| protocol | rows | attack rate | precision | recall | F1 | normal rows flagged |\n|---|---|---|---|---|---|---|\n"
+        + "\n".join(
+            f"| {p} | {v['rows']} | {v['attack_rate']:.4f} | {v['precision']:.4f} | {v['recall']:.4f} | {v['f1']:.4f} | {v['flagged_normal_rate']:.4f} |"
+            for p, v in per_proto.items()
+        )
+        + "\n\n"
         "## Threshold sweep (even percentiles + the chosen one)\n\n"
         "| percentile | threshold | precision | recall | F1 | flagged rate |\n|---|---|---|---|---|---|\n"
         f"{sweep_lines}\n\n"
@@ -176,6 +215,7 @@ def main():
 
     print(json.dumps({
         "chosen": best,
+        "per_proto": per_proto,
         "normal_error_mean": float(normal_test_errors.mean()),
         "attack_error_mean": float(attack_test_errors.mean()),
         "rows_total": len(dataset),

@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from dataset import CATEGORICAL_COLUMNS, NUMERIC_COLUMNS
+from dataset import CATEGORICAL_COLUMNS, LOG_COLUMNS, NUMERIC_COLUMNS
 
 
 def top_categories(values: pd.Series, top_n: int) -> list[str]:
@@ -27,7 +27,8 @@ def onehot(values: pd.Series, categories: list[str]) -> np.ndarray:
 
 def log_transform_numeric(df: pd.DataFrame) -> pd.DataFrame:
     numeric = df[NUMERIC_COLUMNS].copy()
-    numeric["dst_port"] = np.log1p(numeric["dst_port"])
+    for col in LOG_COLUMNS:
+        numeric[col] = np.log1p(numeric[col].clip(lower=0))
     return numeric
 
 

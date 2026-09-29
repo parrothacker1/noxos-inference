@@ -1,3 +1,4 @@
+import os
 import tomllib
 from pathlib import Path
 
@@ -6,5 +7,6 @@ REPO_ROOT = TRAINING_DIR.parent
 
 
 def load_config() -> dict:
-    with open(TRAINING_DIR / "config.toml", "rb") as f:
+    path = TRAINING_DIR / os.environ.get("NOXOS_AE_CONFIG", "config.toml")
+    with open(path, "rb") as f:
         return tomllib.load(f)
