@@ -22,6 +22,7 @@ type node struct {
 	Feature     string   `json:"feature,omitempty"`
 	Threshold   float64  `json:"threshold,omitempty"`
 	DefaultLeft bool     `json:"default_left,omitempty"`
+	Cover       float64  `json:"cover"`
 	Left        *node    `json:"left,omitempty"`
 	Right       *node    `json:"right,omitempty"`
 }
@@ -29,6 +30,7 @@ type node struct {
 type model struct {
 	BaseScore       float64             `json:"base_score"`
 	FeatureDefaults map[string]float64  `json:"feature_defaults"`
+	FeatureScale    map[string]float64  `json:"feature_scale"`
 	Trees           []*node             `json:"trees"`
 	Categories      map[string][]string `json:"categories"`
 }
@@ -111,7 +113,7 @@ func sigmoid(x float64) float64 {
 	return 1.0 / (1.0 + math.Exp(-x))
 }
 
-func (m *model) predict(features map[string]float64) float64 {
+func (m *model) mergedFeatures(features map[string]float64) map[string]float64 {
 	full := make(map[string]float64, len(m.FeatureDefaults)+len(features))
 	for k, v := range m.FeatureDefaults {
 		full[k] = v
@@ -119,6 +121,11 @@ func (m *model) predict(features map[string]float64) float64 {
 	for k, v := range features {
 		full[k] = v
 	}
+	return full
+}
+
+func (m *model) predict(features map[string]float64) float64 {
+	full := m.mergedFeatures(features)
 	margin := m.BaseScore
 	for _, t := range m.Trees {
 		margin += evalTree(t, full)
@@ -255,11 +262,17 @@ func (s *server) analyzeNetwork(c *gin.Context) {
 		}
 	}
 
-	attackProbability := m.predict(m.encodeRequest(payload))
+	features := m.encodeRequest(payload)
+	attackProbability := m.predict(features)
+	verdict := bucketVerdict(attackProbability)
+
+	explanation := m.explain(features)
+	contributions := rankContributions(explanation.Phi, m.mergedFeatures(features))
+
 	c.JSON(http.StatusOK, gin.H{
-		"verdict":      bucketVerdict(attackProbability),
+		"verdict":      verdict,
 		"safety_score": math.Round((1.0-attackProbability)*10000) / 10000,
-		"reasoning":    nil,
+		"reasoning":    reasoningText(verdict, contributions),
 	})
 }
 
