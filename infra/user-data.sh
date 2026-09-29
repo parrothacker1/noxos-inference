@@ -2,25 +2,22 @@
 set -euo pipefail
 export HOME=/root
 
-GO_VERSION=1.26.5
-GO_TARBALL="go${GO_VERSION}.linux-amd64.tar.gz"
-curl -sL "https://go.dev/dl/${GO_TARBALL}" -o "/tmp/${GO_TARBALL}"
-rm -rf /usr/local/go
-tar -C /usr/local -xzf "/tmp/${GO_TARBALL}"
-ln -sf /usr/local/go/bin/go /usr/local/bin/go
+BASE="https://github.com/parrothacker1/noxos-inference/releases/download/teacher-server-latest"
 
 id -u noxos &>/dev/null || useradd --system --home /opt/noxos-inference --create-home --shell /usr/sbin/nologin noxos
 
-sudo -u noxos git clone --branch teacher-server --single-branch \
-  https://github.com/parrothacker1/noxos-inference.git /opt/noxos-inference/src
-
-cd /opt/noxos-inference/src
-sudo -u noxos /usr/local/bin/go build -o /opt/noxos-inference/teacher-server .
+cd /opt/noxos-inference
+curl -sfL "${BASE}/teacher-server-linux-amd64" -o teacher-server
+curl -sfL "${BASE}/teacher-server-linux-amd64.sha256" -o teacher-server.sha256
+echo "$(cut -d' ' -f1 teacher-server.sha256)  teacher-server" | sha256sum -c -
+chmod 755 teacher-server
+chown noxos:noxos teacher-server
 
 cat > /etc/systemd/system/noxos-inference.service <<'EOF'
 [Unit]
 Description=noxos-inference teacher-server
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple

@@ -27,7 +27,18 @@ aws ec2 authorize-security-group-ingress --group-id "$SG_ID" \
 
 **Known gap, flagged not hidden, same as before the reset**: port 8443 is plain HTTP behind a shared-secret bearer token, not TLS — no domain name yet. Fix before this carries real traffic.
 
-## 2. Launch (on-demand, stopped after setup — not left running)
+## 2. Publish the binary, then launch (on-demand, stopped after setup — not left running)
+
+**Do not compile on the box.** The first attempt built `teacher-server` from source on the 1 GiB `t3.micro` and the Go compiler was OOM-killed (`compile: signal: killed` after ~46 minutes of thrashing), so the service never started. Cross-compile locally and publish the static binary instead; `user-data.sh` downloads it and verifies the SHA256:
+
+```bash
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o teacher-server-linux-amd64 .
+sha256sum teacher-server-linux-amd64 > teacher-server-linux-amd64.sha256
+gh release create teacher-server-latest teacher-server-linux-amd64 teacher-server-linux-amd64.sha256 --target teacher-server
+```
+
+The binary release is a manual build, not CI — rebuild and re-publish it whenever `teacher-server`'s code changes.
+
 
 ```bash
 AMI_ID=$(aws ec2 describe-images --owners 099720109477 \
