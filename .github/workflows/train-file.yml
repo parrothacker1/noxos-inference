@@ -1,0 +1,70 @@
+name: Train and publish file classifier
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: file-classifier
+
+      - uses: astral-sh/setup-uv@v5
+
+      - working-directory: training
+        run: uv sync
+
+      - name: Fetch Drebin feature files (SHA256 is verified by the training code)
+        working-directory: training
+        run: |
+          mkdir -p ../data
+          uv run python - <<'EOF'
+          import subprocess, tomllib
+          d = tomllib.load(open("config.toml", "rb"))["dataset"]
+          for url_key, file_key in (("features_url", "features_file"), ("categories_url", "categories_file")):
+              subprocess.run(["curl", "-sfL", d[url_key], "-o", f"../{d['raw_dir']}/{d[file_key]}"], check=True)
+          EOF
+
+      - name: Train
+        working-directory: training
+        run: uv run train_file.py
+
+      - name: Export and verify against the real model
+        working-directory: training
+        run: uv run test_export.py
+
+      - name: Build release assets
+        id: assets
+        working-directory: training
+        run: |
+          VERSION=$(date +%s)
+          cp models/file_classifier_ondevice.json model.json
+          SHA256=$(sha256sum model.json | cut -d' ' -f1)
+          echo "$SHA256  model.json" > model.json.sha256
+          printf '{"version": %s, "sha256": "%s", "modelUrl": "https://github.com/%s/releases/download/file-latest/model.json"}' \
+            "$VERSION" "$SHA256" "$GITHUB_REPOSITORY" > manifest.json
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Publish rolling "latest" release
+        working-directory: training
+        run: |
+          gh release delete file-latest --yes --cleanup-tag || true
+          gh release create file-latest model.json manifest.json model.json.sha256 METRICS.md \
+            --title "File classifier (latest) - ADVISORY ONLY" \
+            --notes "ADVISORY ONLY. Drebin-2012 permission vocabulary, unvalidated on modern APKs; must not gate quarantine or any verdict. Automated run, version ${{ steps.assets.outputs.version }}."
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Publish versioned release
+        working-directory: training
+        run: |
+          gh release create "file-${{ steps.assets.outputs.version }}" model.json manifest.json model.json.sha256 METRICS.md \
+            --title "File classifier v${{ steps.assets.outputs.version }} - ADVISORY ONLY" \
+            --notes "ADVISORY ONLY. Drebin-2012 permission vocabulary, unvalidated on modern APKs; must not gate quarantine or any verdict."
+        env:
+          GH_TOKEN: ${{ github.token }}
