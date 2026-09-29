@@ -1,56 +1,80 @@
-# Autoencoder — unsupervised anomaly-detection tier (Tier 1)
+# Autoencoder trained on MIRAGE-2019 (real Android app traffic, normal only)
 
-Trained on normal traffic only (1616920 rows, `label == 0`), never sees an attack label. One shared encoder/bottleneck; decoder heads: linear/MSE over the 7 z-score-standardized numeric features, plus one softmax/cross-entropy head per categorical feature (proto, state). Architecture: input(17) -> hidden(32) -> bottleneck(4) -> hidden(32) -> [numeric(7), proto(3), state(7)], LeakyReLU, 60 epochs, Adam lr=0.001.
+Normal-traffic anomaly detector: no attack label is used. One shared encoder/bottleneck, MSE head over the 7 log-transformed, z-scored numeric features and a softmax head for `proto`; per-row error = mean numeric squared error + cross-entropy. Architecture input -> 32 -> 4 -> 32 -> outputs, LeakyReLU, 60 epochs, Adam lr 0.001.
 
-Reconstruction error per row = **mean** over numeric features of squared error + sum over categorical heads of per-row cross-entropy (unweighted).
+## Data and features
 
-## Encoding
+- Source: MIRAGE-2019, the downloadable release: 20 Android apps on 2 devices (the paper describes 40 apps; this public release is a subset). Giuseppe Aceto, Domenico Ciuonzo, Antonio Montieri, Valerio Persico and Antonio Pescapè, "MIRAGE: Mobile-app Traffic Capture and Ground-truth Creation", 4th IEEE International Conference on Computing, Communications and Security (ICCCS 2019). Dataset licence: CC BY-NC-ND 4.0.
+- **The licence is non-commercial and no-derivatives. A commercial product must retrain on Warden's own logged traffic.**
+- 124950 destination snapshots ({'tcp': 118890, 'udp': 6060}), from 1638 captures and 20 apps.
+- One record per destination IP per capture, at a random snapshot time in 0-30 s, aggregating that destination's flows. Per-packet detail exists only for each flow's first 32 packets; beyond that, counts are interpolated linearly from flow totals.
+- Flows have no absolute start time, so a destination's flows are assumed to start together (this overcounts if they start later).
+- Upstream IP bytes are estimated as payload plus the flow's average header overhead (per-packet IP length is not stored).
+- No TCP flags in the data, so **`state` is not a feature** here. `dttl` is not a feature (not capturable on Android).
+- Mostly HTTPS over TCP; UDP is thin. Captures are single-app sessions, so 'normal' means these 40 apps.
 
-- `dst_port`: `log1p` before standardization.
-- Categorical features bucketed to the top 6 values by frequency in the normal-only training split plus `other`:
-  - `proto`: tcp, udp, other
-  - `state`: FIN, CON, INT, REQ, RST, CLO, other
-- `dttl` (destination TTL) and `state` (connection state) were added after a feature sweep — the original 10 features capped F1 at ~0.75 (see `knowledge-graph/noxos-inference/TASKS.md`).
+## Split (by app, so the test measures unseen apps)
 
-## Held-out evaluation (`StratifiedGroupKFold`, groups = exact feature pattern over all model inputs)
+- Train 88785, calibration 14400 (com.joelapenna.foursquared, com.spotify.music), test 21765 (com.google.android.youtube, com.iconology.comics, com.tripadvisor.tripadvisor, com.twitter.android).
+- Threshold: 99th percentile of calibration-app reconstruction error = 1.90863.
 
-- Held-out rows: 435593 (395919 normal, 39674 attack)
-- Mean reconstruction error: normal 0.0034 (median 0.0009), attack 0.0322 (median 0.0072)
-- Chosen threshold: 92th percentile of normal held-out error = 0.00626 (F1-maximizing point of the sweep below; note it is selected on the same held-out set it is reported on, so treat the F1 as slightly optimistic)
+## False-flag rate on held-out normal traffic (unseen apps)
 
-## At the chosen threshold
+| calibration percentile | all | TCP | UDP |
+|---|---|---|---|
+| 95 | 0.0637 | 0.0144 | 0.3435 |
+| 97 | 0.0123 | 0.0022 | 0.0696 |
+| 99 | 0.0001 | 0.0000 | 0.0006 |
+| 99.5 | 0.0000 | 0.0000 | 0.0000 |
 
-- Accuracy: 0.9220
-- Precision: 0.5412
-- Recall: 0.9417
-- F1: 0.6874
-- Flagged rate: 0.1585
+If the model generalises across apps, the rate should be close to 1 minus the percentile. A larger number means unseen apps look unusual.
 
-## Per-protocol breakdown at the chosen threshold (overall F1 hides this)
+### Spread across 5 different app splits (each retrains from scratch; the shipped model is the first)
 
-| protocol | rows | attack rate | precision | recall | F1 | normal rows flagged |
+At the 99th percentile the false-flag rate on unseen apps ranged from 0.0001 to 0.0086 (mean 0.0050); with only 20 apps, which apps are held out matters a lot.
+
+| seed | held-out apps | all | TCP | UDP |
+|---|---|---|---|---|
+| 42 | com.google.android.youtube, com.iconology.comics, com.tripadvisor.tripadvisor, com.twitter.android | 0.0001 | 0.0000 | 0.0006 |
+| 43 | com.google.android.youtube, com.groupon, com.trello, com.waze | 0.0086 | 0.0057 | 0.0198 |
+| 44 | com.duolingo, com.groupon, com.iconology.comics, com.trello | 0.0051 | 0.0050 | 0.0139 |
+| 45 | com.duolingo, com.joelapenna.foursquared, com.pinterest, com.twitter.android | 0.0037 | 0.0035 | 0.0154 |
+| 46 | com.contextlogic.wish, com.trello, de.motain.iliga, it.subito | 0.0077 | 0.0072 | 0.0659 |
+
+## Sanity checks, NOT validation
+
+Synthetic anomaly shapes I defined in feature space (they show the model is not blind to extreme shapes, nothing more):
+
+- syn_scan (tcp, random port, 1-2 packets, no reply): 0.0005 flagged
+- udp_flood (udp, thousands of packets, no reply): 0.0425 flagged
+- big_upload (tcp 443, tens of thousands of packets up): 0.0000 flagged
+
+UNSW-NB15 rows scored with this model at the same threshold (different network, whole-flow records, so units differ; treat as a rough shift indicator only):
+
+- UNSW-NB15 normal rows: all 0.3707 of 2012839, tcp 0.1697 of 1330535, udp 0.7627 of 682304
+- UNSW-NB15 attack rows: all 0.7564 of 214990, tcp 0.1656 of 49030, udp 0.9310 of 165960
+
+## Threshold sensitivity and proxy F1 (added after review; primary model, seed 42)
+
+Error scale on calibration apps: median 0.003, 95th percentile 0.16, 99th 1.91 (heavy tail); held-out apps: median 0.005, 99th 0.57. The 99th-percentile threshold from only 2 calibration apps is therefore far too loose (0.01% of held-out normal flagged, almost no detection).
+
+| calib. pct | threshold | held-out normal flagged all / TCP / UDP | synthetic SYN scan / UDP flood / big upload detected | UNSW proxy F1 all / TCP / UDP | UNSW normal flagged TCP / UDP | UNSW attack flagged TCP / UDP |
 |---|---|---|---|---|---|---|
-| tcp | 269264 | 0.0364 | 0.2172 | 0.8911 | 0.3493 | 0.1214 |
-| udp | 166329 | 0.1796 | 0.9938 | 0.9584 | 0.9757 | 0.0013 |
+| 90 | 0.065 | 0.142 / 0.055 / 0.635 | 0.949 / 1.000 / 0.538 | 0.177 / 0.053 / 0.327 | 0.862 / 1.000 | 0.666 / 1.000 |
+| 93 | 0.101 | 0.096 / 0.028 / 0.478 | 0.878 / 1.000 / 0.275 | 0.178 / 0.048 / 0.329 | 0.818 / 0.989 | 0.567 / 0.998 |
+| 95 | 0.160 | 0.064 / 0.014 / 0.344 | 0.779 / 1.000 / 0.112 | 0.188 / 0.050 / 0.331 | 0.715 / 0.973 | 0.526 / 0.992 |
+| 97 | 0.497 | 0.012 / 0.002 / 0.070 | 0.126 / 0.983 / 0.000 | 0.213 / 0.051 / 0.350 | 0.532 / 0.873 | 0.403 / 0.974 |
+| 99 | 1.909 | 0.0001 / 0.000 / 0.0006 | 0.001 / 0.043 / 0.000 | 0.289 / 0.057 / 0.367 | 0.170 / 0.763 | 0.166 / 0.931 |
 
-## Threshold sweep (even percentiles + the chosen one)
+How to read this:
+- **The UNSW proxy F1 (0.18-0.29 overall, TCP about 0.05, UDP 0.33-0.37 at every threshold) is not a usable measure.** This model finds UNSW *normal* TCP more anomalous (median error 0.572) than UNSW *attack* TCP (0.217), so the proxy is dominated by the difference between two networks and measurement units, not by normal-versus-attack. It does not show the model works and does not show it fails.
+- **No F1 above 0.80 can be measured or honestly claimed from these data.** In-domain there are no attacks.
+- At the 95th percentile, held-out normal TCP is flagged 1.4% (under 5%), and synthetic SYN-scan-like and UDP-flood-like shapes are flagged 78% and 100%. But held-out normal UDP is flagged 34%, because UDP is only 5% of the data and the threshold is set mostly by TCP; per-protocol thresholds would be needed.
+- The synthetic "big upload" shape is essentially not detected at any useful threshold (log-scaling compresses large counts). The synthetic shapes are my own definitions, so this shows blind spots, not real-attack performance.
 
-| percentile | threshold | precision | recall | F1 | flagged rate |
-|---|---|---|---|---|---|
-| 70 | 0.00164 | 0.2457 | 0.9750 | 0.3925 | 0.3615 |
-| 72 | 0.00176 | 0.2585 | 0.9741 | 0.4086 | 0.3432 |
-| 74 | 0.00191 | 0.2727 | 0.9729 | 0.4260 | 0.3249 |
-| 76 | 0.00208 | 0.2886 | 0.9718 | 0.4451 | 0.3067 |
-| 78 | 0.00227 | 0.3064 | 0.9698 | 0.4656 | 0.2883 |
-| 80 | 0.00248 | 0.3266 | 0.9681 | 0.4885 | 0.2700 |
-| 82 | 0.00275 | 0.3499 | 0.9668 | 0.5138 | 0.2517 |
-| 84 | 0.00304 | 0.3766 | 0.9645 | 0.5417 | 0.2333 |
-| 86 | 0.00349 | 0.4077 | 0.9616 | 0.5726 | 0.2148 |
-| 88 | 0.00419 | 0.4443 | 0.9575 | 0.6069 | 0.1963 |
-| 90 | 0.00497 | 0.4881 | 0.9516 | 0.6453 | 0.1776 |
-| 92 | 0.00626 | 0.5412 | 0.9417 | 0.6874 | 0.1585 |
-| 94 | 0.00866 | 0.2695 | 0.2210 | 0.2428 | 0.0747 |
-| 96 | 0.01515 | 0.2976 | 0.1691 | 0.2157 | 0.0518 |
-| 98 | 0.02757 | 0.3552 | 0.1099 | 0.1679 | 0.0282 |
+## Limits
 
-Not a like-for-like comparison with the teacher/student models: this is an unsupervised anomaly detector scored against labels it never trained on.
+- There is no attack traffic in MIRAGE, so detection ability in this domain is unmeasured.
+- Trained on 3 devices and 40 apps; another phone, OS version or app mix may shift the distribution.
+- The threshold changes on every retrain; read `reconstruction_threshold` from the model file.
+- Superseded once a model trained on Warden-captured traffic exists.

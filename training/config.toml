@@ -6,10 +6,20 @@ urls = [
 raw_dir = "data/raw"
 protos = ["tcp", "udp"]
 
+[mirage]
+archive_url = "https://traffic.comics.unina.it/mirage/MIRAGE/MIRAGE-2019_traffic_dataset_downloadable_v2.tar.gz"
+archive_file = "data/raw/mirage.tar.gz"
+archive_sha256 = "14d8f0a86cc288492dab0ddba4178255873c3c8bba1c3440aa38a908fad60221"
+dir = "data/raw/mirage/MIRAGE-2019_traffic_dataset_downloadable"
+records = "data/raw/mirage_records.parquet"
+test_app_fraction = 0.2
+calibration_app_fraction = 0.1
+threshold_percentile = 99
+
 [features]
 numeric = ["dst_port", "src_byte_count", "src_packet_count", "dst_byte_count", "duration_millis", "handshake_latency_millis", "smean"]
 log = ["dst_port", "src_byte_count", "src_packet_count", "dst_byte_count", "duration_millis", "handshake_latency_millis", "smean"]
-categorical = ["proto", "state"]
+categorical = ["proto"]
 
 [training]
 n_splits = 5
