@@ -85,3 +85,18 @@ func TestAnalyzeFileEndpoint(t *testing.T) {
 		t.Errorf("empty permission list: code=%d out=%v, want 200 allow", code, out)
 	}
 }
+
+func TestAnalyzeFileReasoningIsNullWhenModelHasNoCoverage(t *testing.T) {
+	m := syntheticFileModel()
+	m.Trees[0].Cover = 0
+	s := &server{network: &slot{name: "network"}, file: &slot{name: "file"}}
+	s.file.model.Store(m)
+
+	code, out := postFile(t, s, "", `{"permission_strings":["android.permission.SEND_SMS"]}`)
+	if code != http.StatusOK || out["verdict"] != "block" {
+		t.Fatalf("verdict must still be served: code=%d out=%v", code, out)
+	}
+	if reasoning, present := out["reasoning"]; !present || reasoning != nil {
+		t.Errorf("reasoning must be an explicit null when coverage is missing, got %v", out["reasoning"])
+	}
+}

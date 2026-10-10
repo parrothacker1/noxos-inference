@@ -92,3 +92,16 @@ func TestReasoningTextNamesRealDrivers(t *testing.T) {
 		t.Errorf("block and allow reasoning text should differ, got the same: %q", blockText)
 	}
 }
+
+func TestReasoningIsNullWithoutCoverageStatistics(t *testing.T) {
+	covered := syntheticExplainModel()
+	if !covered.hasCoverage() {
+		t.Fatal("a model with cover on every split must report coverage")
+	}
+
+	leaf := 1.0
+	uncovered := &model{Trees: []*node{{Feature: "a", Threshold: 1, Left: &node{Leaf: &leaf}, Right: &node{Leaf: &leaf}}}}
+	if uncovered.hasCoverage() {
+		t.Fatal("a model exported before cover existed must not report coverage")
+	}
+}

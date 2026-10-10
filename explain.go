@@ -145,6 +145,18 @@ func computeExpectation(n *node) float64 {
 	return (n.Left.Cover*leftExp + n.Right.Cover*rightExp) / totalCover
 }
 
+func (m *model) hasCoverage() bool {
+	if len(m.Trees) == 0 {
+		return false
+	}
+	for _, t := range m.Trees {
+		if t.Leaf == nil && t.Cover <= 0 {
+			return false
+		}
+	}
+	return true
+}
+
 type explanation struct {
 	BaseValue float64
 	Phi       map[string]float64

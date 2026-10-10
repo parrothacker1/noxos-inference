@@ -121,13 +121,16 @@ func (s *server) analyzeFile(c *gin.Context) {
 	malwareProbability := m.predict(features)
 	verdict := bucketVerdict(malwareProbability)
 
-	explanation := m.explain(features)
-	contributions := rankContributions(explanation.Phi, m.mergedFeatures(features))
+	var reasoning any
+	if m.hasCoverage() {
+		explanation := m.explain(features)
+		reasoning = fileReasoning(verdict, rankContributions(explanation.Phi, m.mergedFeatures(features)))
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"verdict":      verdict,
 		"safety_score": math.Round((1.0-malwareProbability)*10000) / 10000,
-		"reasoning":    fileReasoning(verdict, contributions),
+		"reasoning":    reasoning,
 		"advisory":     true,
 	})
 }
