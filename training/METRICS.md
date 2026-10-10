@@ -56,3 +56,37 @@ Shapes I defined in feature space, detected fraction (mean (min-max) over splits
 - The UNSW-NB15 proxy was dropped: it measured the gap between networks, not attacks.
 - 20 apps in total; another phone, OS version or app mix may shift the distribution.
 - Thresholds change on every retrain; always read them from the model file. Superseded once a model trained on Warden-captured traffic exists.
+
+## UDP threshold recalibration
+
+Weights, features, transforms, categories, error formula and the TCP threshold are unchanged. Only `reconstruction_thresholds.udp` changed: 0.125071 -> 0.429368.
+
+**Rule.** The UDP threshold is the 99th percentile of normal UDP reconstruction error pooled over out-of-fold rows from all 5 app splits (calibration and test rows; every row scored by a model that never trained on its app), with every app weighted equally. Why: the old rule used one split's calibration apps (132-807 UDP rows, threshold ranging 0.125-0.499 across splits), and one app (YouTube) holds 69% of the pooled UDP rows, so a plain percentile mostly describes YouTube. It was chosen by comparing rules on held-out apps, not by fitting to any device's test flows.
+
+**Evaluation**, leave-split-out: for each split the threshold is computed from the other splits' rows excluding the apps in this split's test set, then applied to this split's test apps. Old rule = calibration-only percentile as shipped before.
+
+Old rule (99th of that split's calibration UDP): UDP false-flag 0.0585 (0.0026-0.1944), per-app mean 0.0334 (0.0023-0.0951), UDP flood detected 0.9812 (0.9585-0.9990), DNS-like flows flagged 0.1433 (0.0000-0.4000)
+
+| seed | threshold | UDP false-flag | per-app mean false-flag | UDP flood detected | DNS-like flagged (rows) |
+|---|---|---|---|---|---|
+| 42 | 0.1251 | 0.1944 | 0.0951 | 0.9990 | 0.250 (20) |
+| 43 | 0.4988 | 0.0355 | 0.0093 | 0.9585 | 0.000 (24) |
+| 44 | 0.1610 | 0.0417 | 0.0415 | 0.9990 | 0.400 (15) |
+| 45 | 0.2305 | 0.0026 | 0.0023 | 0.9705 | 0.067 (15) |
+| 46 | 0.4476 | 0.0183 | 0.0189 | 0.9790 | 0.000 (34) |
+
+New rule: UDP false-flag 0.0217 (0.0000-0.0513), per-app mean 0.0163 (0.0000-0.0616), UDP flood detected 0.9463 (0.8625-0.9925), DNS-like flows flagged 0.0613 (0.0000-0.2647)
+
+| seed | threshold | UDP false-flag | per-app mean false-flag | UDP flood detected | DNS-like flagged (rows) |
+|---|---|---|---|---|---|
+| 42 | 0.4463 | 0.0083 | 0.0022 | 0.9460 | 0.000 (20) |
+| 43 | 0.3873 | 0.0490 | 0.0180 | 0.9825 | 0.042 (24) |
+| 44 | 0.4892 | 0.0000 | 0.0000 | 0.9480 | 0.000 (15) |
+| 45 | 0.4562 | 0.0000 | 0.0000 | 0.8625 | 0.000 (15) |
+| 46 | 0.3193 | 0.0513 | 0.0616 | 0.9925 | 0.265 (34) |
+
+DNS-like = UDP snapshots with at most 3 source packets, under 400 source bytes and under 2000 destination bytes. MIRAGE has no UDP traffic on port 53, so this is a shape proxy (mostly Spotify discovery on 57621, STUN on 3478, DHCP), not real DNS.
+
+Shipped model on its own split-42 UDP rows (calibration and test apps), old vs new threshold: flagged 0.1581 -> 0.0069; DNS-like flows flagged 0.030 -> 0.000 (370 rows).
+
+**Remaining limits.** F1 is still unmeasured (MIRAGE has no attacks). A rate of a few percent on unseen apps remains and is not zero. The pooled errors come from the 5 retrained split models, not the shipped weights themselves. Real DNS (port 53) is absent from the training data. The cost of the higher threshold is UDP flood sensitivity: 94.6% (86.3-99.3%) detected against 98.1% (95.9-99.9%) before; smaller UDP anomalies sitting between the old and new threshold are no longer flagged.
