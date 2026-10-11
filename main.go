@@ -375,7 +375,7 @@ func main() {
 
 	router := s.router()
 
-	addr := ":" + envOr("PORT", "8080")
+	addr := os.Getenv("NOXOS_BIND_ADDRESS") + ":" + envOr("PORT", "8080")
 	log.Printf("listening on %s", addr)
 	log.Fatal(router.Run(addr))
 }
