@@ -10,6 +10,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"sync/atomic"
 	"time"
@@ -146,6 +147,65 @@ func (m *model) encodeRequest(payload map[string]any) map[string]float64 {
 		}
 	}
 	return features
+}
+
+func numberField(payload map[string]any, name string) (float64, bool, bool) {
+	raw, present := payload[name]
+	if !present {
+		return 0, false, false
+	}
+	value, ok := raw.(float64)
+	if !ok || math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
+		return 0, true, false
+	}
+	return value, true, true
+}
+
+func (m *model) requireFeatures(payload map[string]any) (map[string]float64, []string, []string) {
+	missing, invalid := []string{}, []string{}
+	features := make(map[string]float64, len(m.FeatureDefaults))
+	derived := map[string][2]string{
+		"smean": {"src_byte_count", "src_packet_count"},
+		"dmean": {"dst_byte_count", "dst_packet_count"},
+	}
+	for name := range m.FeatureDefaults {
+		if categories, isCategorical := m.Categories[name]; isCategorical {
+			raw, present := payload[name]
+			text, isText := raw.(string)
+			switch {
+			case !present:
+				missing = append(missing, name)
+			case !isText || indexOf(categories, text) < 0:
+				invalid = append(invalid, name)
+			default:
+				features[name] = float64(indexOf(categories, text))
+			}
+			continue
+		}
+		value, present, ok := numberField(payload, name)
+		switch {
+		case present && ok:
+			features[name] = value
+		case present:
+			invalid = append(invalid, name)
+		case name == "handshake_latency_millis":
+			features[name] = 0
+		case derived[name] != [2]string{}:
+			total, totalPresent, totalOK := numberField(payload, derived[name][0])
+			count, countPresent, countOK := numberField(payload, derived[name][1])
+			switch {
+			case totalPresent && countPresent && totalOK && countOK && count > 0:
+				features[name] = total / count
+			case totalPresent && countPresent && totalOK && countOK:
+				features[name] = 0
+			}
+		default:
+			missing = append(missing, name)
+		}
+	}
+	sort.Strings(missing)
+	sort.Strings(invalid)
+	return features, missing, invalid
 }
 
 func indexOf(values []string, target string) int {
@@ -333,7 +393,15 @@ func (s *server) analyzeNetwork(c *gin.Context) {
 		}
 	}
 
-	features := m.encodeRequest(payload)
+	features, missing, invalid := m.requireFeatures(payload)
+	if len(missing) > 0 || len(invalid) > 0 {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"detail":  "no verdict: the request does not carry the flow features the model needs",
+			"missing": missing,
+			"invalid": invalid,
+		})
+		return
+	}
 	attackProbability := m.predict(features)
 	verdict := bucketVerdict(attackProbability)
 
